@@ -668,6 +668,14 @@ static uint64_t pace(uint64_t *target, uint64_t now, uint64_t period) {
 }
 
 static void sleep_until(uint64_t deadline) {
+    // MKW_ACQUIRE_HIRES=ab compares the high-resolution timer already used by present with the old millisecond
+    // acquire wait in one run. Keep the display deadline and the GPU release fence unchanged: only the OS wait differs.
+    static int hires = -1;
+    if (hires < 0) hires = rt_knob("ACQUIRE_HIRES", "0");
+    if (RT_KNOB_ON(hires)) {
+        plat_sleep_until_ns(deadline);
+        return;
+    }
     for (;;) {
         uint64_t now = kern_now_ns();
         if (now >= deadline) return;
