@@ -1,28 +1,32 @@
-"""Fetch what the Windows build needs into build/win: llvm-mingw (clang + lld for x86_64-w64-mingw32, UCRT) and the
-headers, import libraries and DLLs of SDL3, libusb, Opus, libvpx, zstd, Vulkan, VMA and xxHash.
+"""Fetch what the Windows build needs into build/win: llvm-mingw (clang + lld for x86_64-w64-mingw32, UCRT), Ninja on
+Windows, and the headers, import libraries and DLLs of SDL3, libusb, Opus, libvpx, zstd, Vulkan, VMA and xxHash.
 
 Why: the Windows exe is cross-compiled from Linux (tools/build/build.py --target windows) the way totk-pc-recomp builds
 its installer with --toolchain: llvm-mingw plus the MSYS2 UCRT64 packages (pins taken from its tools/make_release.py,
-MIT). SDL3 is built here from its source release with that toolchain: the upstream mingw package (and MSYS2's) has no
-libusb, and SDL starts the Switch 2 controllers over USB only through it (it sends their start-up commands on the
-second, non-HID interface; discussion #113). Built with SDL_HIDAPI_LIBUSB_SHARED, SDL3.dll loads libusb-1.0.dll (MSYS2,
-LGPL-2.1, beside it) when present. Every download is checked against its sha256; a mismatch stops.
+MIT). On Windows the same toolchain runs natively and Ninja comes with it, so the ordinary build commands work from
+either host. SDL3 is built here from its source release with that toolchain: the upstream mingw package (and MSYS2's)
+has no libusb, and SDL starts the Switch 2 controllers over USB only through it (it sends their start-up commands on
+the second, non-HID interface; discussion #113). Built with SDL_HIDAPI_LIBUSB_SHARED, SDL3.dll loads libusb-1.0.dll
+(MSYS2, LGPL-2.1, beside it) when present. Every download is checked against its sha256; a mismatch stops.
 
 Layout:
     build/win/llvm-mingw/   the toolchain (bin/x86_64-w64-mingw32-clang)
+    build/win/ninja/        ninja.exe on Windows
     build/win/deps/         include/, lib/ (import and static libraries), bin/ (the DLLs mkw.exe loads)
 
-Usage: uv run tools/build/windeps.py [--dry-run]   (downloads cached in build/win/dl; ~250 MB unpacked; SDL needs cmake
-and ninja, ~10 s on 16 threads)
+Usage: uv run tools/build/windeps.py [--dry-run]   (downloads cached in build/win/dl; ~250 MB unpacked; SDL needs cmake,
+~10 s on 16 threads)
 """
 
 import argparse
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
 import tarfile
 import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,9 +40,17 @@ PINS = {
     "llvm-mingw": (
         (
             f"https://github.com/mstorsjo/llvm-mingw/releases/download/{LLVM_VERSION}/"
-            f"llvm-mingw-{LLVM_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz"
+            + (
+                f"llvm-mingw-{LLVM_VERSION}-ucrt-x86_64.zip"
+                if os.name == "nt"
+                else f"llvm-mingw-{LLVM_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz"
+            )
         ),
-        "55064b60b991a1e1e8090b8c2f84e82b22cfe5903d12c159d65064cf5e8ae335",
+        (
+            "fd5462b7f5d93b2ff981fcd3f9c7e427e47f3203c64ea91c27bcc444eebd74cd"
+            if os.name == "nt"
+            else "55064b60b991a1e1e8090b8c2f84e82b22cfe5903d12c159d65064cf5e8ae335"
+        ),
     ),
     "sdl3-src": (
         f"https://github.com/libsdl-org/SDL/releases/download/release-{SDL_VERSION}/SDL3-{SDL_VERSION}.tar.gz",
@@ -81,6 +93,11 @@ PINS = {
         "dbdb8427280046a2b41697780aa4c52983b708082b0da4755951dc3bea96ca89",
     ),
 }
+if os.name == "nt":
+    PINS["ninja"] = (
+        "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip",
+        "07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65",
+    )
 # vulkan-1.dll is the system's (the GPU driver installs it): only its import library is kept.
 SKIP_DLLS = {"vulkan-1.dll"}
 
@@ -111,17 +128,33 @@ def fetch(name: str) -> Path:
 def unpack_llvm(archive: Path) -> None:
     dst = WIN / "llvm-mingw"
     stamp = dst / ".version"
-    if stamp.is_file() and stamp.read_text() == LLVM_VERSION:
+    version = f"{LLVM_VERSION}-{'windows' if os.name == 'nt' else 'linux'}"
+    if stamp.is_file() and stamp.read_text() == version:
         return
     shutil.rmtree(dst, ignore_errors=True)
     tmp = WIN / "llvm-mingw.tmp"
     shutil.rmtree(tmp, ignore_errors=True)
-    with tarfile.open(archive) as t:
-        t.extractall(tmp, filter="tar")
+    if archive.suffix == ".zip":
+        with zipfile.ZipFile(archive) as z:
+            z.extractall(tmp)
+    else:
+        with tarfile.open(archive) as t:
+            t.extractall(tmp, filter="tar")
     (top,) = tmp.iterdir()
     top.rename(dst)
     tmp.rmdir()
-    stamp.write_text(LLVM_VERSION)
+    stamp.write_text(version)
+
+
+def unpack_ninja(archive: Path) -> None:
+    """The Windows-host Ninja used by this build and by windeps' SDL build."""
+    dst = WIN / "ninja"
+    shutil.rmtree(dst, ignore_errors=True)
+    dst.mkdir(parents=True)
+    with zipfile.ZipFile(archive) as z:
+        (member,) = [name for name in z.namelist() if Path(name).name == "ninja.exe"]
+        with z.open(member) as src, (dst / "ninja.exe").open("wb") as f:
+            shutil.copyfileobj(src, f)
 
 
 def unpack_deps(archives: dict[str, Path]) -> None:
@@ -153,16 +186,27 @@ def build_sdl(source: Path) -> None:
     work.mkdir(parents=True)
     with tarfile.open(source) as t:
         t.extractall(work, filter="tar")
-    deps, cc = WIN / "deps", WIN / "llvm-mingw/bin/x86_64-w64-mingw32-"
+    deps = WIN / "deps"
+    deps_arg = deps.as_posix() if os.name == "nt" else str(deps)
+    cc = (
+        (WIN / "llvm-mingw/bin").as_posix() + "/x86_64-w64-mingw32-"
+        if os.name == "nt"
+        else WIN / "llvm-mingw/bin/x86_64-w64-mingw32-"
+    )
+    exe = ".exe" if os.name == "nt" else ""
     src = work / f"SDL3-{SDL_VERSION}"
     configure = [
         "cmake", "-S", str(src), "-B", str(work / "build"), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
-        "-DCMAKE_SYSTEM_NAME=Windows", "-DCMAKE_SYSTEM_PROCESSOR=x86_64", f"-DCMAKE_C_COMPILER={cc}clang",
-        f"-DCMAKE_CXX_COMPILER={cc}clang++", f"-DCMAKE_RC_COMPILER={cc}windres", f"-DCMAKE_INSTALL_PREFIX={deps}",
+        "-DCMAKE_SYSTEM_NAME=Windows", "-DCMAKE_SYSTEM_PROCESSOR=x86_64",
+        f"-DCMAKE_C_COMPILER={cc}clang{exe}", f"-DCMAKE_CXX_COMPILER={cc}clang++{exe}",
+        f"-DCMAKE_RC_COMPILER={cc}windres{exe}", f"-DCMAKE_INSTALL_PREFIX={deps_arg}",
         "-DSDL_STATIC=OFF", "-DSDL_TEST_LIBRARY=OFF", "-DSDL_TESTS=OFF", "-DSDL_EXAMPLES=OFF",
         "-DSDL_HIDAPI_LIBUSB=ON", "-DSDL_HIDAPI_LIBUSB_SHARED=ON",
-        f"-DLibUSB_LIBRARY={deps / 'lib/libusb-1.0.dll.a'}", f"-DLibUSB_INCLUDE_PATH={deps / 'include/libusb-1.0'}",
+        f"-DLibUSB_LIBRARY={(deps / 'lib/libusb-1.0.dll.a').as_posix() if os.name == 'nt' else deps / 'lib/libusb-1.0.dll.a'}",
+        f"-DLibUSB_INCLUDE_PATH={(deps / 'include/libusb-1.0').as_posix() if os.name == 'nt' else deps / 'include/libusb-1.0'}",
     ]  # fmt: skip
+    if os.name == "nt":
+        configure += [f"-DCMAKE_MAKE_PROGRAM={(WIN / 'ninja/ninja.exe').as_posix()}"]
     subprocess.run(configure, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["cmake", "--build", str(work / "build"), "--target", "install"], check=True,
                    stdout=subprocess.DEVNULL)  # fmt: skip
@@ -186,6 +230,8 @@ def main() -> None:
     DL.mkdir(parents=True, exist_ok=True)
     paths = {name: fetch(name) for name in PINS}
     unpack_llvm(paths.pop("llvm-mingw"))
+    if ninja := paths.pop("ninja", None):
+        unpack_ninja(ninja)
     vpx_license = paths.pop("libvpx-license")
     sdl_source = paths.pop("sdl3-src")
     unpack_deps(paths)

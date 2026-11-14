@@ -10,8 +10,8 @@ code's tables (runtime/core/boot/gamelib.h: module layout, function tables, the 
 game copy, patch sets); build/obj/rt/defaults.c the default game paths; build/obj/rt/i18n/ the menu texts
 of every language, from i18n/*.po (tools/i18n/catalog.py).
 
---target windows cross-compiles build/mkw.exe from Linux with llvm-mingw and the MSYS2 UCRT64 libraries that
-tools/build/windeps.py puts in build/win (totk-pc-recomp's --toolchain build: its LLVM_LINK_LIBS). Objects go to
+--target windows builds build/mkw.exe on Linux or natively on Windows with llvm-mingw and the MSYS2 UCRT64 libraries
+that tools/build/windeps.py puts in build/win (totk-pc-recomp's --toolchain build: its LLVM_LINK_LIBS). Objects go to
 build/obj-win. The window, input, keyboard and menu are SDL3 on both systems; platform/win32.c replaces platform/linux.c.
 
 Usage: uv run tools/build/build.py [--target linux|windows] [--gen build/generated] [--exefs DIR] [--romfs DIR]
@@ -20,6 +20,7 @@ Heavy (all cores, several GB): our runs go through tools/run/job.sh.
 """
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -37,6 +38,14 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "runtime"
 GAME = Path(os.environ.get("MKW_GAME", ROOT / "game"))
 WIN = ROOT / "build/win"  # tools/build/windeps.py
+NINJA = WIN / "ninja" / ("ninja.exe" if os.name == "nt" else "ninja")
+
+
+def mingw_tool(name: str) -> str:
+    """A tool from windeps' llvm-mingw; the Windows-host package spells the executables with .exe."""
+    return str(WIN / "llvm-mingw/bin" / (name + (".exe" if os.name == "nt" else "")))
+
+
 # The CPU the game and runtime are built for. x86-64: AVX2 (x86-64-v3). AArch64: ARMv8.2 with the extensions of every
 # Cortex-A76-class core or newer (Snapdragon 8cx/8 Gen 1+, Raspberry Pi 5, Apple M): LSE atomics, FP16, RCpc, dot
 # product, CRC32. The lifted code also leaves x18 alone there: kern_ap_stub (runtime/core/kernel/kernel_preempt.c)
@@ -88,19 +97,33 @@ LINUX = Target(
     ROOT / "scratchpad/vma",  # vk_mem_alloc.h 3.4.0 (AUR only on Arch); fetched as in tools/build/README.md
 )  # fmt: skip
 WINDOWS = Target(
-    str(WIN / "llvm-mingw/bin/x86_64-w64-mingw32-clang"), str(WIN / "llvm-mingw/bin/x86_64-w64-mingw32-clang++"),
-    str(WIN / "llvm-mingw/bin/llvm-ar"), ROOT / "build/mkw.exe",
+    mingw_tool("x86_64-w64-mingw32-clang"), mingw_tool("x86_64-w64-mingw32-clang++"),
+    mingw_tool("llvm-ar"), ROOT / "build/mkw.exe",
     [f"-I{WIN / 'deps/include'}"],
     # 16 MiB main-thread stack, as mkw; the map as on Linux.
     [f"-L{WIN / 'deps/lib'}", "-fuse-ld=lld", "-Wl,--stack,16777216", "-Wl,--Map=$builddir/mkw.map"],
     ["-lpsapi", "-lbcrypt", "-ladvapi32", "-lws2_32", "-liphlpapi", "-luser32", "-lole32", "-luuid", "-lshell32", "-lgdi32", "-ldwmapi", "-lruntimeobject", "-lwinmm", "-lvulkan-1", "-lSDL3", "-lopus",
      "-l:libvpx.a", "-l:libzstd.a", "-l:libc++.a", "-l:libc++abi.a", "-l:libunwind.a", "-l:libwinpthread.a"],
     WIN / "deps/include/vma",
-    str(WIN / "llvm-mingw/bin/x86_64-w64-mingw32-windres"),
+    mingw_tool("x86_64-w64-mingw32-windres"),
 )  # fmt: skip
 
 
 def mem_total_gb() -> float:
+    if os.name == "nt":
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_uint32),
+                ("load", ctypes.c_uint32),
+                ("total", ctypes.c_uint64),
+                ("available", ctypes.c_uint64),
+                ("rest", ctypes.c_uint64 * 5),
+            ]
+
+        status = MemoryStatus(length=ctypes.sizeof(MemoryStatus))
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return status.total / 1024**3
+        raise OSError("GlobalMemoryStatusEx failed")
     with open("/proc/meminfo") as f:
         for line in f:
             if line.startswith("MemTotal:"):
@@ -119,6 +142,12 @@ def runtime_sources(target: Target) -> list[Path]:
 
 def c_string(s: str) -> str:
     return json.dumps(s)
+
+
+def ninja_path(path: Path | str) -> str:
+    """A path in a Ninja build edge: Windows drive-letter colons need Ninja's $: escape."""
+    value = str(path)
+    return value.replace("$", "$$").replace(":", "$:") if os.name == "nt" else value
 
 
 def game_id() -> str:
@@ -236,7 +265,11 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
             f"rule tabcc\n  command = {cc} -std=gnu11 $tabflags -MD -MF $out.d -c $in -o $out\n"
             "  depfile = $out.d\n  deps = gcc\n  description = cc $in"
         ),
-        f"rule ar\n  command = rm -f $out && {target.ar} rcs $out $in\n  description = ar $out",
+        (
+            f"rule ar\n  command = {subprocess.list2cmdline([sys.executable, str(ROOT / 'tools/build/archive.py')])} "
+            f"{target.ar} $out $out.rsp\n  rspfile = $out.rsp\n  rspfile_content = $in_newline"
+            "\n  description = ar $out"
+        ),
         (
             f"rule solink\n  command = {' '.join([target.cc, *(sys_flags or [])])} -shared -fuse-ld=lld -o $out $in $solibs"
             "\n  description = link $out"
@@ -254,43 +287,57 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
         for src in sorted((gen / mod).glob("*.c")):
             obj = out / mod / (src.stem + ".o")
             objs.append(str(obj))
-            lines.append(f"build {obj}: cc {src}")
+            lines.append(f"build {ninja_path(obj)}: cc {ninja_path(src)}")
         lib = out / f"lib{mod}.a"
         libs.append(str(lib))
-        lines.append(f"build {lib}: ar {' '.join(objs)}")
+        lines.append(f"build {ninja_path(lib)}: ar {' '.join(map(ninja_path, objs))}")
     rt_objs = []
     rt_srcs = [*runtime_sources(target), out / "rt/defaults.c", *sorted((out / "rt/i18n").glob("ui_text_*.c"))]
     rt_srcs.append(out / "rt/app_icon.c")   # the window's icon, drawn by tools/build/icon.py (never committed)
-    lines.append(f"build {out / 'rt/app_icon.c'}: icon {ROOT / 'tools/build/icon.py'}")
+    lines.append(
+        f"build {ninja_path(out / 'rt/app_icon.c')}: icon {ninja_path(ROOT / 'tools/build/icon.py')}"
+    )
     rt_srcs += [] if dist else [out / "rt/modules.c"]
     for src in rt_srcs:
         rel = src.relative_to(RUNTIME) if src.is_relative_to(RUNTIME) else Path(src.name)
         obj = out / "rt" / rel.with_suffix(".o")
         rt_objs.append(str(obj))
-        lines.append(f"build {obj}: {'rtcxx' if src.suffix == '.cpp' else 'rtcc'} {src}")
+        lines.append(f"build {ninja_path(obj)}: {'rtcxx' if src.suffix == '.cpp' else 'rtcc'} {ninja_path(src)}")
     if target.windres:  # windres writes no depfile: the manifest and the icon it embeds are listed by hand
         rc = RUNTIME / "platform/mkw.rc"
         ico = out / "rt/platform/mkw.ico"  # drawn by tools/build/icon.py, never committed
         rt_objs.append(str(out / "rt/platform/mkw_rc.o"))
-        lines.append(f"build {ico}: icon {ROOT / 'tools/build/icon.py'}")
-        lines.append(f"build {rt_objs[-1]}: rc {rc} | {rc.with_suffix('.manifest')} {ico}")
+        lines.append(f"build {ninja_path(ico)}: icon {ninja_path(ROOT / 'tools/build/icon.py')}")
+        lines.append(
+            f"build {ninja_path(rt_objs[-1])}: rc {ninja_path(rc)} | "
+            f"{ninja_path(rc.with_suffix('.manifest'))} {ninja_path(ico)}"
+        )
     if not dist:
-        lines.append(f"build {target.exe}: link {' '.join(rt_objs)} {' '.join(libs)}")
+        lines.append(
+            f"build {ninja_path(target.exe)}: link {' '.join(map(ninja_path, rt_objs))} "
+            f"{' '.join(map(ninja_path, libs))}"
+        )
         return "\n".join(lines) + "\n"
     exe = dist / target.exe.name
     tab = out / "rt/modules.o"
     if runtime_only:
-        lines.append(f"build {exe}{f' | {out}/libmkw.dll.a' if target is WINDOWS else ''}: link {' '.join(rt_objs)}")
+        implicit = f" | {ninja_path(out / 'libmkw.dll.a')}" if target is WINDOWS else ""
+        lines.append(f"build {ninja_path(exe)}{implicit}: link {' '.join(map(ninja_path, rt_objs))}")
         return "\n".join(lines) + "\n"
-    lines.append(f"build {tab}: tabcc {out / 'rt/modules.c'}")
+    lines.append(f"build {ninja_path(tab)}: tabcc {ninja_path(out / 'rt/modules.c')}")
     if target is LINUX:
-        lines.append(f"build {exe}: link {' '.join(rt_objs)}")
-        lines.append(f"build {dist / 'mkwgame.so'}: solink {tab} {' '.join(libs)}")
+        lines.append(f"build {ninja_path(exe)}: link {' '.join(map(ninja_path, rt_objs))}")
+        lines.append(
+            f"build {ninja_path(dist / 'mkwgame.so')}: solink {ninja_path(tab)} {' '.join(map(ninja_path, libs))}"
+        )
         lines.append("  solibs = -Wl,-z,noexecstack")
     else:
         implib = out / "libmkw.dll.a"
-        lines.append(f"build {exe} | {implib}: link {' '.join(rt_objs)}")
-        lines.append(f"build {dist / 'mkwgame.dll'}: solink {tab} {' '.join(libs)} | {implib}")
+        lines.append(f"build {ninja_path(exe)} | {ninja_path(implib)}: link {' '.join(map(ninja_path, rt_objs))}")
+        lines.append(
+            f"build {ninja_path(dist / 'mkwgame.dll')}: solink {ninja_path(tab)} "
+            f"{' '.join(map(ninja_path, libs))} | {ninja_path(implib)}"
+        )
         lines.append(f"  solibs = {implib}")
     return "\n".join(lines) + "\n"
 
@@ -341,7 +388,8 @@ def main() -> None:
     dist = ROOT / "build/dist" / (args.target + (f"-{ARCH}" if cross else "")) if args.dist else None
     args.out = args.out or ROOT / ("build/obj" + ("-dist" if dist else "") + ("-win" if target is WINDOWS else "")
                                    + (f"-{ARCH}" if cross else ""))  # fmt: skip
-    for tool in (target.cc, target.cxx, "ninja", target.ar):
+    ninja = str(NINJA) if target is WINDOWS and NINJA.is_file() else "ninja"
+    for tool in (target.cc, target.cxx, ninja, target.ar):
         if not shutil.which(tool):
             sys.exit(f"{tool} not found" + (" (uv run tools/build/windeps.py)" if target is WINDOWS else ""))
     if not (target.vma / "vk_mem_alloc.h").is_file():
@@ -368,7 +416,7 @@ def main() -> None:
     )
     if target is LINUX and not dist:
         write_compile_db(args.out / "build.ninja")
-    cmd = ["ninja", "-f", str(args.out / "build.ninja"), "-j", str(jobs)] + (["-n"] if args.dry_run else [])
+    cmd = [ninja, "-f", str(args.out / "build.ninja"), "-j", str(jobs)] + (["-n"] if args.dry_run else [])
     print(f"{' '.join(cmd)}  ({jobs} jobs)")
     sys.exit(subprocess.run(cmd, check=False).returncode)
 
