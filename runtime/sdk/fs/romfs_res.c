@@ -22,6 +22,7 @@
 
 #include "cfg.h"
 #include "fs.h"
+#include "gfx.h"
 #include "host.h"
 #include "ov.h"
 #include "platform/platform.h"
@@ -206,8 +207,15 @@ const char *romfs_resolution_overlay(void) {
     uint32_t r3d = 0;
     int pm = temporal_permille();
     if (pm) {
+        // the share is of the picture's lines on screen (the window's, or the setting's), the game rendering at most
+        // its screen's: a 1820-line window at quality renders 1213 lines, upscaled to the window (vk_temporal.c)
+        int out = lines;
+        int ww = 0, wh = 0;
+        if (!out && gfx_window_shape(&ww, &wh)) out = wh;
         if (!lines) lines = ov_handheld() ? 1080 : 1440;
-        r3d = (uint32_t)((lines * pm + 500) / 1000);
+        if (out < lines) out = lines;
+        r3d = (uint32_t)((out * pm + 500) / 1000);
+        if (r3d > (uint32_t)lines) r3d = (uint32_t)lines;
     }
     if (!lines && lod <= 0) return NULL;
     const char *dir = write_overlay(lines, r3d, lod);

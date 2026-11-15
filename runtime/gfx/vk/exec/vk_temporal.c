@@ -760,9 +760,10 @@ void vk_tmp_sampled(VkImage *image, VkImageView *view) {
 static int retarget_wanted(uint32_t sw, uint32_t sh) {
     static int on = -1;
     if (on < 0) on = cfg_get("MKW_TEMPORAL_RETARGET") ? strcmp(cfg_get("MKW_TEMPORAL_RETARGET"), "0") != 0 : 1;
-    if (!on || !RT.ow || !RT.oh || RT.oh <= sh || RT.ow <= sw) return 0;
-    double a = (double)RT.ow / RT.oh, b = (double)sw / sh;   // the same picture, larger: the same shape
-    return a / b < 1.01 && b / a < 1.01;
+    // larger in both directions; with MKW_ASPECT wider than 16:9 the game keeps 16:9 targets for a wider camera and its
+    // last pass stretches them (3840x1820 from 2560x1440 on a 2.11 window): the big target is the output's shape, and
+    // the upscaler and the HUD's passes stretch the same way
+    return on && RT.ow >= sw && RT.oh >= sh && (RT.ow > sw || RT.oh > sh);
 }
 
 // ---------------------------------------------------------------- matrices
