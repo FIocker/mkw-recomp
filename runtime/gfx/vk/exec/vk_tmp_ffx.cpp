@@ -19,6 +19,7 @@
 #include "vk/ffx_api_vk.h"
 
 extern "C" {
+#include "cfg.h"
 #include "gfx.h"
 #include "host.h"
 #include "vk.h"
@@ -295,6 +296,10 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
     cf.frameGenerationEnabled = true;
     cf.allowAsyncWorkloads = false;
     cf.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
+    // Opt-in SDK diagnostics expose its motion/occlusion decisions in the generated picture. Keep NO_SWAPCHAIN:
+    // this port owns presentation even when inspecting the provider's debug view.
+    const char *debug = cfg_get("MKW_FSR_FG_DEBUG");
+    if (debug && strcmp(debug, "0")) cf.flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_VIEW;
     cf.generationRect = {0, 0, (int32_t)bb->w, (int32_t)bb->h};
     cf.frameID = FG.id;
     // the picture without the HUD (vk_tmp_fg_hudless; bb's format and size): FSR 3.1 takes the HUD from the
