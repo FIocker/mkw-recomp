@@ -11,6 +11,7 @@
 #include <windows.h>
 #endif
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "ffx_api.h"
@@ -323,7 +324,15 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
     pr.cameraNear = in->near_;
     pr.cameraFar = in->far_;
     pr.cameraFovAngleVertical = in->fov_y;
-    pr.viewSpaceToMetersFactor = 0.01f;
+    // Game assets use metre-scale positions (Mario's body bounds are about 1.74 units, unit bone scale), matching
+    // the race depth's ~4.2-unit camera-to-driver distance. A centimetre conversion shrinks the SDK's scene by 100x.
+    pr.viewSpaceToMetersFactor = 1.0f;
+    // Diagnostic calibration override for comparing the former centimetre assumption against the measured units.
+    const char *meters = cfg_get("MKW_FG_METERS");
+    if (meters) {
+        float scale = strtof(meters, nullptr);
+        if (scale >= 0.0001f && scale <= 100.f) pr.viewSpaceToMetersFactor = scale;
+    }
     VkTmpRes rz = {in->depth, VK_FORMAT_R32_SFLOAT, in->w, in->h}, rm = {in->mv, VK_FORMAT_R16G16_SFLOAT, in->w, in->h};
     pr.depth = res(&rz, 0);
     pr.motionVectors = res(&rm, 0);
