@@ -18,11 +18,21 @@
 #define BYTES (W * H * 4)
 #define CHECK(x) do { if (!(x)) { printf("probe-fsr-fg: FAILED line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 
+static float motion_x = -4, motion_y = 2;
+static int opaque_shadow;
+static uint16_t half(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    if (!(bits & 0x7fffffff)) return (uint16_t)(bits >> 16);
+    // This probe accepts integer displacements in [-128,128], all exactly representable in binary16.
+    return (uint16_t)((bits >> 16 & 0x8000) | (((bits >> 23 & 255) - 112) << 10) | (bits >> 13 & 1023));
+}
 static int body(int x, int y) { return x >= 104 && x < 152 && y >= 28 && y < 78; }
 static int shadow(int x, int y) { return x >= 88 && x < 168 && y >= 76 && y < 98; }
 static uint8_t channel(int x, int y, double t, int k) {
     if (body(x, y)) return (uint8_t)(60 + ((x * (k + 3) + y * (k + 5)) % 160));
-    double xx = x - 4.0 * t, yy = y + 2.0 * t;
+    if (opaque_shadow && shadow(x,y)) return 32;
+    double xx = x + motion_x * t, yy = y + motion_y * t;
     double p = 128 + 35 * sin(xx * .13 + yy * .031 + k) + 33 * cos(yy * .19 + xx * .017 + k * .7)
                    + 28 * sin(xx * .071 - yy * .11);
     return (uint8_t)(p * (shadow(x, y) ? .25 : 1.0));
@@ -53,6 +63,14 @@ int probe_fsr_fg(void) {
     const char *mode = cfg_get("MKW_FSR_PROBE_MV");
     if (!mode) mode = "geometry";
     CHECK(!strcmp(mode, "geometry") || !strcmp(mode, "image") || !strcmp(mode, "zero"));
+    const char *opaque = cfg_get("MKW_FSR_PROBE_OPAQUE");
+    opaque_shadow = opaque && strcmp(opaque,"0");
+    const char *shift = cfg_get("MKW_FSR_PROBE_SHIFT");
+    if (shift) {
+        CHECK(sscanf(shift,"%f,%f",&motion_x,&motion_y) == 2);
+        CHECK(isfinite(motion_x) && isfinite(motion_y) && fabsf(motion_x) <= 128 && fabsf(motion_y) <= 128 &&
+              motion_x == roundf(motion_x) && motion_y == roundf(motion_y));
+    }
     VkBuffer staging; VmaAllocation memory; VmaAllocationInfo map;
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = BYTES * 4,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
@@ -96,8 +114,8 @@ int probe_fsr_fg(void) {
             ((float *)(bytes + BYTES))[p] = (100.f - 100.f / (body(x,y) ? 2.f : 4.f)) / 99.f;
             int still = body(x,y) || !strcmp(mode, "zero") || (!strcmp(mode,"image") && shadow(x,y));
             uint16_t *mv = (uint16_t *)(bytes + BYTES * 2) + p * 2;
-            mv[0] = still ? 0 : 0xc400;   // half -4
-            mv[1] = still ? 0 : 0x4000;   // half +2
+            mv[0] = still ? 0 : half(motion_x);
+            mv[1] = still ? 0 : half(motion_y);
         }
         CHECK(vmaFlushAllocation(c->vma, memory, 0, BYTES * 3) == VK_SUCCESS);
         if (frame) CHECK(vkResetFences(c->device, 1, &fence) == VK_SUCCESS);
@@ -153,7 +171,8 @@ int probe_fsr_fg(void) {
         }
         count[group]++; bad[group] += worst > 24;
     }
-    printf("probe-fsr-fg: %s vectors, analytical midpoint after 20 frames; validation errors %ld\n", mode, vk_validation_errors_total());
+    printf("probe-fsr-fg: %s vectors (%.0f,%.0f), %s shadow, analytical midpoint after 20 frames; validation errors %ld\n",
+        mode,motion_x,motion_y,opaque_shadow?"opaque":"textured",vk_validation_errors_total());
     const char *names[3] = {"body", "shadow", "road"};
     for (int i = 0; i < 3; i++) printf("probe-fsr-fg: %s mean RGB error %.3f /255, >24 max-RGB %d/%d\n",
         names[i], error[i]/(3*count[i]), bad[i], count[i]);
