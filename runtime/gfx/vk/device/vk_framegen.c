@@ -69,6 +69,7 @@ static struct {
     VkFormat hfmt;
     int mv_w, mv_h;
     int w, h, fresh, cur, have_prev;
+    VkImage compare_native;   // diagnostic pair for this call's dump: FSR made frame plus native synthesis
     int nomem_w, nomem_h;   // the size whose images did not fit: not tried again until the size changes
     float lambda, bias;
     float last_jx, last_jy;
@@ -358,6 +359,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     VkCtx *c = vk_ctx();
     if (!F.tried) init(c);
     if (!F.ok) return 0;
+    F.compare_native = VK_NULL_HANDLE;
     int cx = 0, cy = 0, cw = sw, ch = sh;
     if (crop && crop[2] > 0 && crop[3] > 0) cx = crop[0], cy = crop[1], cw = crop[2], ch = crop[3];
     if (cx < 0) cx = 0;
@@ -396,6 +398,12 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     // DLSS Frame Generation or FSR 3.1 frame generation (MKW_FG_ENGINE, vk_temporal.c) in the place of the optical flow,
     // from the same game frame's depth, motion vectors and camera; the flow below when they cannot
     int eng = !strcmp(cfg_value("MKW_FG_ENGINE"), "dlss") ? 1 : !strcmp(cfg_value("MKW_FG_ENGINE"), "fsr3") ? 2 : 0;
+    int hdr = vk_fg_src_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || vk_fg_src_format == VK_FORMAT_R16G16B16A16_SFLOAT;
+    // SDR-only diagnostic: the native synthesis of exactly the two source pictures used by the real FSR generation.
+    // It is read back beside the FSR frame and is never included in out[] or presented.
+    static int compare_native_mode = -1;
+    if (compare_native_mode < 0) compare_native_mode = rt_knob("FG_COMPARE_NATIVE", "0");
+    int compare_native = eng == 2 && !hdr && RT_KNOB_ON(compare_native_mode);
     // FSR interpolation can use the native flow's object motion too. MKW_FG_FLOW_MV is the A/B switch while its
     // confidence gates are tuned; off by default until the hardware comparison.
     static int flow_mv_mode = -1;
@@ -412,7 +420,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
         mv_ready = 1;
     }
     int flow_ready = 0;
-    if (made && (eng == 0 || mv_ready)) {
+    if (made && (eng == 0 || mv_ready || compare_native)) {
         const float pc16[4] = {16, F.lambda, F.bias, 0}, pc4[4] = {4, F.lambda, F.bias, 0}, pc1[4] = {1, F.lambda, F.bias, 0};
         pass(cb, F.coarse, &F.le[prev], &F.le[cur], NULL, &F.fl[0], pc16, (gw + 1) / 2, (gh + 1) / 2);
         pass(cb, F.median, &F.fl[0], NULL, NULL, &F.fl[1], level, (gw + 1) / 2, (gh + 1) / 2);
@@ -423,7 +431,6 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
         flow_ready = 1;
     }
     // an HDR10 picture (10-bit PQ) goes to them in its own format
-    int hdr = vk_fg_src_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || vk_fg_src_format == VK_FORMAT_R16G16B16A16_SFLOAT;
     if (made && eng && hdr && (F.hw != cw || F.hh != ch || F.hfmt != vk_fg_src_format)) {
         vk_queue_lock();
         vkDeviceWaitIdle(c->device);
@@ -472,6 +479,12 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                     in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
                 }
                 got = vk_tmp_ffx_fg(cb, &in, &bb, &outs[0]);
+                // Readback-only twin at the FSR frame's midpoint. FSR uses M[0]; this spare image never enters out[].
+                if (got == 1 && compare_native && !use_h && flow_ready) {
+                    const float pc[4] = {0.5f, 1.0f / (16.0f * (float)gw), 1.0f / (16.0f * (float)gh), 0};
+                    pass(cb, F.synth, &F.pic[prev], &F.pic[cur], &F.fl[5], &F.made[1], pc, (uint32_t)cw, (uint32_t)ch);
+                    F.compare_native = F.made[1].img;
+                }
             }
         }
         if (got) {
@@ -515,6 +528,11 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
 // The frames per game frame the setting asks for now: 0 off (also under the turbo, whose frames are dropped anyway),
 // else 1..VK_FG_MAX, at most what the swapchain has room for
 static int mult_now(void) {
+    // Diagnostic same-run comparison: A presents source frames alone, B includes the selected generation engine.
+    // The simulation stays at the configured rate; framegen counters never stand in for base-frame throughput.
+    static int bench = -1;
+    if (bench < 0) bench = rt_knob("FG_BENCH", "1");
+    if (!RT_KNOB_ON(bench)) return 0;
     const char *v = cfg_value("MKW_FRAMEGEN");
     if (!strcmp(v, "off") || turbo_speed() > 1) return 0;
     int m;
@@ -542,23 +560,28 @@ int vk_fg_wanted(void) { return strcmp(cfg_value("MKW_FRAMEGEN"), "off") != 0; }
 // MKW_FG_DUMP=<game frame> (checking, with MKW_FG_DUMP_DIR, default "."): from that game frame of frame generation on,
 // four in a row as g<n>.png and the first frame made before each as m<n>.png, read back on the present thread (it
 // waits for the GPU then): tools/imagen/fg_check.py takes three g in a row (the made frame between the first and the
-// third against the second). MKW_SHOTS reads the game's pictures, black on some machines; these are what is shown.
+// third against the second). MKW_FG_COMPARE_NATIVE=1 in an SDR FSR run also writes r<n>.png, the diagnostic native
+// synthesis at t=0.5 from the same two source pictures; it is never presented. MKW_SHOTS reads the game's pictures,
+// black on some machines; these are what is shown.
 uint64_t vk_fg_game_frame;   // the game frame vk_fg_frame is called for (vk_backend.c present_main)
 VkFormat vk_fg_src_format = VK_FORMAT_R8G8B8A8_UNORM;   // that frame's picture format (vk_backend.c)
 VkFormat vk_fg_out_format = VK_FORMAT_R8G8B8A8_UNORM;   // the format of the frames vk_fg_frame handed out
 
-static struct { uint64_t at; VkBuffer buf; VmaAllocation alloc; void *map; VkDeviceSize size; } D;
+static struct { uint64_t at; VkBuffer buf; VmaAllocation alloc; void *map; VkDeviceSize size; int ref; } D;
 
-static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int h) {
+static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int h, VkImage native_ref) {
     if (!D.at) {
         const char *e = cfg_get("MKW_FG_DUMP");
         D.at = e && atoll(e) > 0 ? (uint64_t)atoll(e) : UINT64_MAX;
     }
-    if (F.frames < D.at || F.frames >= D.at + 4 || (D.buf && D.size < (VkDeviceSize)w * h * 8)) return 0;
+    if (F.frames < D.at || F.frames >= D.at + 4 || (D.buf && D.size < (VkDeviceSize)w * h * 12)) {
+        D.ref = 0;
+        return 0;
+    }
     VkCtx *c = vk_ctx();
     if (!D.buf) {
-        D.size = (VkDeviceSize)w * h * 8;
-        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)w * h * 8,
+        D.size = (VkDeviceSize)w * h * 12;
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)w * h * 12,
                                  .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
@@ -570,6 +593,11 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
     vkCmdCopyImageToBuffer(cb, out[n - 1], VK_IMAGE_LAYOUT_GENERAL, D.buf, 1, &bc);
     bc.bufferOffset = (VkDeviceSize)w * h * 4;
     if (n > 1) vkCmdCopyImageToBuffer(cb, out[0], VK_IMAGE_LAYOUT_GENERAL, D.buf, 1, &bc);
+    D.ref = native_ref != VK_NULL_HANDLE;
+    if (D.ref) {
+        bc.bufferOffset = (VkDeviceSize)w * h * 8;
+        vkCmdCopyImageToBuffer(cb, native_ref, VK_IMAGE_LAYOUT_GENERAL, D.buf, 1, &bc);
+    }
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
                            .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
@@ -587,6 +615,10 @@ static void dump_write(VkFence fence, int n, int w, int h) {
     for (int k = 0; k < (n > 1 ? 2 : 1); k++) {
         snprintf(path, sizeof path, "%s/%c%llu.png", dir, k ? 'm' : 'g', (unsigned long long)F.frames);
         rt_write_png(path, (const uint8_t *)D.map + (size_t)k * w * h * 4, (uint32_t)w, (uint32_t)h);
+    }
+    if (D.ref) {
+        snprintf(path, sizeof path, "%s/r%llu.png", dir, (unsigned long long)F.frames);
+        rt_write_png(path, (const uint8_t *)D.map + (size_t)2 * w * h * 4, (uint32_t)w, (uint32_t)h);
     }
     rt_log("vk: frame generation: game frame %llu written to %s (interval %.1f ms)", (unsigned long long)F.frames, dir,
            F.interval / 1e6);
@@ -639,7 +671,7 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
     }
     int n = vk_fg_record(cb, src, sw, sh, crop, m - 1, out, w, h);
     if (F.qp) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, F.qp, 2 * slot + 1), F.q_used[slot] = n > 0;
-    int dump = n && dump_record(cb, out, n, *w, *h);
+    int dump = n && dump_record(cb, out, n, *w, *h, F.compare_native);
     vkEndCommandBuffer(cb);
     if (!n) return 0;   // (recorded nothing the GPU must run: the command buffer is reset next time)
     vkResetFences(c->device, 1, &F.fence[slot]);
