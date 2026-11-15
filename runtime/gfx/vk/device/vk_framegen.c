@@ -28,6 +28,7 @@
 
 #include "cfg.h"
 #include "fg_flow_spv.h"
+#include "fg_fsr_mv_spv.h"
 #include "fg_luma_spv.h"
 #include "fg_median_spv.h"
 #include "fg_synth_spv.h"
@@ -47,9 +48,9 @@ typedef struct {
 static struct {
     int tried, ok;
     PFN_vkCmdPushDescriptorSetKHR push;
-    VkDescriptorSetLayout dsl;
-    VkPipelineLayout layout;
-    VkPipeline luma, coarse, fine, full, median, synth;
+    VkDescriptorSetLayout dsl, fsr_dsl;
+    VkPipelineLayout layout, fsr_layout;
+    VkPipeline luma, coarse, fine, full, median, synth, fsr_mvp;
     VkSampler sampler;
     VkCommandPool pool;
     VkCommandBuffer cb[SLOTS];
@@ -58,20 +59,27 @@ static struct {
     // the images, for a w x h picture: the game's last two (rgba8), their luma at full size (lf), quarter size (lq) and
     // a sixteenth (le), the vectors of each level and their medians (coarse, fine, full size) and the made frames
     Img pic[2], lf[2], lq[2], le[2], fl[6], made[VK_FG_MAX - 1];
+    // FSR frame generation's dense motion: the native flow with its object motion kept from crossing depth and picture
+    // edges, in FSR's current-to-previous direction and without the render jitter
+    Img fsr_mv;
     // DLSS-G and FSR 3.1 on an HDR10 picture: the game's picture and the made frames in its own 10-bit format (the
     // optical flow's images above are 8-bit), made at first use
     Img hpic, hmade[VK_FG_MAX - 1];
     int hw, hh;
     VkFormat hfmt;
+    int mv_w, mv_h;
     int w, h, fresh, cur, have_prev;
     int nomem_w, nomem_h;   // the size whose images did not fit: not tried again until the size changes
     float lambda, bias;
+    float last_jx, last_jy;
+    int have_jitter;
     // pacing (the present thread)
     uint64_t last_at, interval, frames, made_total;
     int logged_mult, auto_m;   // auto_m: MKW_FRAMEGEN=auto's factor now (mult_now)
 } F;
 
-static VkPipeline make_pipeline(VkCtx *c, const uint32_t *code, size_t size, const int *spec, int nspec) {
+static VkPipeline make_pipeline(VkCtx *c, VkPipelineLayout layout, const uint32_t *code, size_t size, const int *spec,
+                                int nspec) {
     VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = size, .pCode = code};
     VkShaderModule m = VK_NULL_HANDLE;
     if (vkCreateShaderModule(c->device, &mi, NULL, &m) != VK_SUCCESS) return VK_NULL_HANDLE;
@@ -82,7 +90,7 @@ static VkPipeline make_pipeline(VkCtx *c, const uint32_t *code, size_t size, con
                                       .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
                                                 .pSpecializationInfo = nspec ? &si : NULL},
-                                      .layout = F.layout};
+                                      .layout = layout};
     VkPipeline p = VK_NULL_HANDLE;
     if (vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, &p) != VK_SUCCESS) p = VK_NULL_HANDLE;
     vkDestroyShaderModule(c->device, m, NULL);
@@ -125,6 +133,20 @@ static int init(VkCtx *c) {
     VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
     VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
                                      .pSetLayouts = &F.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    // fsr_mv is the only pass with this larger binding layout. Keeping it separate means the opt-in experiment cannot
+    // invalidate the luma, native-flow, median or synthesis pipelines when it is off.
+    VkDescriptorSetLayoutBinding fb[6];
+    for (int i = 0; i < 6; i++)
+        fb[i] = (VkDescriptorSetLayoutBinding){.binding = (uint32_t)i, .descriptorCount = 1,
+                                               .descriptorType = i < 5 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                                                       : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                               .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    VkDescriptorSetLayoutCreateInfo fdci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+                                            .bindingCount = 6, .pBindings = fb};
+    VkPushConstantRange fpr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+    VkPipelineLayoutCreateInfo fli = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                      .pSetLayouts = &F.fsr_dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &fpr};
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR,
                               .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
                               .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
@@ -140,14 +162,17 @@ static int init(VkCtx *c) {
     static const int coarse[7] = {2, 4, 8, 0, 1, 0, 0}, fine[7] = {4, 4, 3, 1, 1, 0, 1}, full[7] = {16, 4, 2, 1, 2, 1, 0};
     if (vkCreateDescriptorSetLayout(c->device, &dci, NULL, &F.dsl) != VK_SUCCESS ||
         vkCreatePipelineLayout(c->device, &li, NULL, &F.layout) != VK_SUCCESS ||
+        vkCreateDescriptorSetLayout(c->device, &fdci, NULL, &F.fsr_dsl) != VK_SUCCESS ||
+        vkCreatePipelineLayout(c->device, &fli, NULL, &F.fsr_layout) != VK_SUCCESS ||
         vkCreateSampler(c->device, &si, NULL, &F.sampler) != VK_SUCCESS ||
         vkCreateCommandPool(c->device, &pci, NULL, &F.pool) != VK_SUCCESS ||
-        !(F.luma = make_pipeline(c, fg_luma_spv, sizeof fg_luma_spv, NULL, 0)) ||
-        !(F.coarse = make_pipeline(c, fg_flow_spv, sizeof fg_flow_spv, coarse, 7)) ||
-        !(F.fine = make_pipeline(c, fg_flow_spv, sizeof fg_flow_spv, fine, 7)) ||
-        !(F.full = make_pipeline(c, fg_flow_spv, sizeof fg_flow_spv, full, 7)) ||
-        !(F.median = make_pipeline(c, fg_median_spv, sizeof fg_median_spv, NULL, 0)) ||
-        !(F.synth = make_pipeline(c, fg_synth_spv, sizeof fg_synth_spv, NULL, 0))) {
+        !(F.luma = make_pipeline(c, F.layout, fg_luma_spv, sizeof fg_luma_spv, NULL, 0)) ||
+        !(F.coarse = make_pipeline(c, F.layout, fg_flow_spv, sizeof fg_flow_spv, coarse, 7)) ||
+        !(F.fine = make_pipeline(c, F.layout, fg_flow_spv, sizeof fg_flow_spv, fine, 7)) ||
+        !(F.full = make_pipeline(c, F.layout, fg_flow_spv, sizeof fg_flow_spv, full, 7)) ||
+        !(F.median = make_pipeline(c, F.layout, fg_median_spv, sizeof fg_median_spv, NULL, 0)) ||
+        !(F.synth = make_pipeline(c, F.layout, fg_synth_spv, sizeof fg_synth_spv, NULL, 0)) ||
+        !(F.fsr_mvp = make_pipeline(c, F.fsr_layout, fg_fsr_mv_spv, sizeof fg_fsr_mv_spv, NULL, 0))) {
         rt_log("vk: frame generation off: its pipelines could not be created");
         return 0;
     }
@@ -173,10 +198,12 @@ static void free_images(VkCtx *c) {
     for (int i = 0; i < 2; i++) free_img(c, &F.pic[i]), free_img(c, &F.lf[i]), free_img(c, &F.lq[i]), free_img(c, &F.le[i]);
     for (int i = 0; i < 6; i++) free_img(c, &F.fl[i]);
     for (int i = 0; i < VK_FG_MAX - 1; i++) free_img(c, &F.made[i]), free_img(c, &F.hmade[i]);
+    free_img(c, &F.fsr_mv);
     free_img(c, &F.hpic);
     F.hw = F.hh = 0, F.hfmt = VK_FORMAT_UNDEFINED;
+    F.mv_w = F.mv_h = 0;
     F.w = F.h = 0;
-    F.have_prev = 0;
+    F.have_prev = 0, F.have_jitter = 0;
 }
 
 static int make_img(VkCtx *c, Img *m, uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags extra) {
@@ -231,6 +258,19 @@ static int ensure_images(VkCtx *c, int w, int h) {
     return 1;
 }
 
+// FSR describes motion vectors at its render size, which is smaller than the displayed picture with DLSS/FSR quality.
+static int ensure_fsr_motion(VkCtx *c, int w, int h) {
+    if (F.fsr_mv.img && F.mv_w == w && F.mv_h == h) return 1;
+    vk_queue_lock();
+    vkDeviceWaitIdle(c->device);
+    vk_queue_unlock();
+    free_img(c, &F.fsr_mv);
+    F.mv_w = F.mv_h = 0;
+    if (!make_img(c, &F.fsr_mv, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16_SFLOAT, 0)) return 0;
+    F.mv_w = w, F.mv_h = h;
+    return 1;
+}
+
 static void mem_barrier(VkCommandBuffer cb) {
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
@@ -269,6 +309,30 @@ static void pass(VkCommandBuffer cb, VkPipeline p, const Img *a, const Img *b, c
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     rec_push(F.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.layout, 0, 4, wr);
     vkCmdPushConstants(cb, F.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, pc);
+    vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
+    mem_barrier(cb);
+}
+
+// Dense FSR motion: the pictures compare and gate the nine coarse-cell candidates, while depth keeps a kart's vector
+// off the road behind it. camera is the per-pixel fallback already in FSR's direction.
+static void fsr_motion_pass(VkCommandBuffer cb, const VkTmpFgInputs *in, const Img *cur, const Img *prev, const Img *flow,
+                            const Img *out, const float pc[8], uint32_t w, uint32_t h) {
+    VkDescriptorImageInfo ii[6] = {{F.sampler, cur->view, VK_IMAGE_LAYOUT_GENERAL},
+                                   {F.sampler, prev->view, VK_IMAGE_LAYOUT_GENERAL},
+                                   {F.sampler, in->depth_view, VK_IMAGE_LAYOUT_GENERAL},
+                                   {F.sampler, in->mv_view, VK_IMAGE_LAYOUT_GENERAL},
+                                   {F.sampler, flow->view, VK_IMAGE_LAYOUT_GENERAL},
+                                   {VK_NULL_HANDLE, out->view, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[6];
+    for (int i = 0; i < 6; i++)
+        wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = (uint32_t)i,
+                                       .descriptorCount = 1,
+                                       .descriptorType = i < 5 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                                               : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                       .pImageInfo = &ii[i]};
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.fsr_mvp);
+    rec_push(F.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.fsr_layout, 0, 6, wr);
+    vkCmdPushConstants(cb, F.fsr_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, pc);
     vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
     mem_barrier(cb);
 }
@@ -316,6 +380,30 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     // DLSS Frame Generation or FSR 3.1 frame generation (MKW_FG_ENGINE, vk_temporal.c) in the place of the optical flow,
     // from the same game frame's depth, motion vectors and camera; the flow below when they cannot
     int eng = !strcmp(cfg_value("MKW_FG_ENGINE"), "dlss") ? 1 : !strcmp(cfg_value("MKW_FG_ENGINE"), "fsr3") ? 2 : 0;
+    // FSR interpolation can use the native flow's object motion too. MKW_FG_FLOW_MV is the A/B switch while its
+    // confidence gates are tuned; off by default until the hardware comparison.
+    int flow_mv = eng == 2 && knob("MKW_FG_FLOW_MV", 0.f) > 0.f;
+    VkTmpFgInputs fgin = {0};
+    int have_fgin = made && flow_mv && vk_tmp_fg_inputs(vk_fg_game_frame, &fgin);
+    int mv_ready = 0;
+    if (have_fgin && !fgin.reset && ensure_fsr_motion(c, (int)fgin.w, (int)fgin.h)) {
+        img_barrier(cb, F.fsr_mv.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0,
+                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                    VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        mem_barrier(cb);
+        mv_ready = 1;
+    }
+    int flow_ready = 0;
+    if (made && (eng == 0 || mv_ready)) {
+        const float pc16[4] = {16, F.lambda, F.bias, 0}, pc4[4] = {4, F.lambda, F.bias, 0}, pc1[4] = {1, F.lambda, F.bias, 0};
+        pass(cb, F.coarse, &F.le[prev], &F.le[cur], NULL, &F.fl[0], pc16, (gw + 1) / 2, (gh + 1) / 2);
+        pass(cb, F.median, &F.fl[0], NULL, NULL, &F.fl[1], level, (gw + 1) / 2, (gh + 1) / 2);
+        pass(cb, F.fine, &F.lq[prev], &F.lq[cur], &F.fl[1], &F.fl[2], pc4, gw, gh);
+        pass(cb, F.median, &F.fl[2], NULL, NULL, &F.fl[3], level, gw, gh);
+        pass(cb, F.full, &F.lf[prev], &F.lf[cur], &F.fl[3], &F.fl[4], pc1, gw, gh);
+        pass(cb, F.median, &F.fl[4], NULL, NULL, &F.fl[5], level, gw, gh);
+        flow_ready = 1;
+    }
     // an HDR10 picture (10-bit PQ) goes to them in its own format
     int hdr = vk_fg_src_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || vk_fg_src_format == VK_FORMAT_R16G16B16A16_SFLOAT;
     if (made && eng && hdr && (F.hw != cw || F.hh != ch || F.hfmt != vk_fg_src_format)) {
@@ -356,7 +444,17 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             got = vk_tmp_dlssg(cb, vk_fg_game_frame, &bb, outs, made);
         } else {
             VkTmpFgInputs in;
-            if (vk_tmp_fg_inputs(vk_fg_game_frame, &in)) got = vk_tmp_ffx_fg(cb, &in, &bb, &outs[0]);
+            if (have_fgin || vk_tmp_fg_inputs(vk_fg_game_frame, &in)) {
+                if (have_fgin) in = fgin;
+                if (mv_ready && flow_ready && !in.reset) {
+                    const float jx = F.have_jitter ? in.jx - F.last_jx : 0.f;
+                    const float jy = F.have_jitter ? in.jy - F.last_jy : 0.f;
+                    const float pc[8] = {(float)in.w, (float)in.h, (float)cw, (float)ch, (float)gw, (float)gh, jx, jy};
+                    fsr_motion_pass(cb, &in, &F.pic[cur], &F.pic[prev], &F.fl[5], &F.fsr_mv, pc, in.w, in.h);
+                    in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
+                }
+                got = vk_tmp_ffx_fg(cb, &in, &bb, &outs[0]);
+            }
         }
         if (got) {
             static int last_eng = -1;
@@ -367,19 +465,22 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             out[made] = P->img;
             vk_fg_out_format = pf;
             *ow = cw, *oh = ch;
+            if (have_fgin) F.last_jx = fgin.jx, F.last_jy = fgin.jy, F.have_jitter = 1;
             F.have_prev = 1;
             F.cur = prev;
             return made + 1;
         }
     }
     if (made) {
-        const float pc16[4] = {16, F.lambda, F.bias, 0}, pc4[4] = {4, F.lambda, F.bias, 0}, pc1[4] = {1, F.lambda, F.bias, 0};
-        pass(cb, F.coarse, &F.le[prev], &F.le[cur], NULL, &F.fl[0], pc16, (gw + 1) / 2, (gh + 1) / 2);
-        pass(cb, F.median, &F.fl[0], NULL, NULL, &F.fl[1], level, (gw + 1) / 2, (gh + 1) / 2);
-        pass(cb, F.fine, &F.lq[prev], &F.lq[cur], &F.fl[1], &F.fl[2], pc4, gw, gh);
-        pass(cb, F.median, &F.fl[2], NULL, NULL, &F.fl[3], level, gw, gh);
-        pass(cb, F.full, &F.lf[prev], &F.lf[cur], &F.fl[3], &F.fl[4], pc1, gw, gh);
-        pass(cb, F.median, &F.fl[4], NULL, NULL, &F.fl[5], level, gw, gh);
+        if (!flow_ready) {
+            const float pc16[4] = {16, F.lambda, F.bias, 0}, pc4[4] = {4, F.lambda, F.bias, 0}, pc1[4] = {1, F.lambda, F.bias, 0};
+            pass(cb, F.coarse, &F.le[prev], &F.le[cur], NULL, &F.fl[0], pc16, (gw + 1) / 2, (gh + 1) / 2);
+            pass(cb, F.median, &F.fl[0], NULL, NULL, &F.fl[1], level, (gw + 1) / 2, (gh + 1) / 2);
+            pass(cb, F.fine, &F.lq[prev], &F.lq[cur], &F.fl[1], &F.fl[2], pc4, gw, gh);
+            pass(cb, F.median, &F.fl[2], NULL, NULL, &F.fl[3], level, gw, gh);
+            pass(cb, F.full, &F.lf[prev], &F.lf[cur], &F.fl[3], &F.fl[4], pc1, gw, gh);
+            pass(cb, F.median, &F.fl[4], NULL, NULL, &F.fl[5], level, gw, gh);
+        }
         for (int k = 0; k < made; k++) {
             const float pc[4] = {(float)(k + 1) / (float)(made + 1), 1.0f / (16.0f * (float)gw), 1.0f / (16.0f * (float)gh), 0};
             pass(cb, F.synth, &F.pic[prev], &F.pic[cur], &F.fl[5], &F.made[k], pc, (uint32_t)cw, (uint32_t)ch);
@@ -541,14 +642,16 @@ void vk_fg_release(void) {
     if (D.buf) vmaDestroyBuffer(c->vma, D.buf, D.alloc);
     memset(&D, 0, sizeof D);
     free_images(c);
-    VkPipeline ps[] = {F.luma, F.coarse, F.fine, F.full, F.median, F.synth};
+    VkPipeline ps[] = {F.luma, F.coarse, F.fine, F.full, F.median, F.synth, F.fsr_mvp};
     for (size_t i = 0; i < sizeof ps / sizeof *ps; i++)
         if (ps[i]) vkDestroyPipeline(c->device, ps[i], NULL);
     for (int i = 0; i < SLOTS; i++)
         if (F.fence[i]) vkDestroyFence(c->device, F.fence[i], NULL);
     if (F.pool) vkDestroyCommandPool(c->device, F.pool, NULL);
     if (F.sampler) vkDestroySampler(c->device, F.sampler, NULL);
+    if (F.fsr_layout) vkDestroyPipelineLayout(c->device, F.fsr_layout, NULL);
     if (F.layout) vkDestroyPipelineLayout(c->device, F.layout, NULL);
+    if (F.fsr_dsl) vkDestroyDescriptorSetLayout(c->device, F.fsr_dsl, NULL);
     if (F.dsl) vkDestroyDescriptorSetLayout(c->device, F.dsl, NULL);
     memset(&F, 0, sizeof F);
 }
