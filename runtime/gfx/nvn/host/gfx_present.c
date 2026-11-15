@@ -481,7 +481,7 @@ static void flip_one_locked_id(uint64_t present_id) {
         }
     }
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
-    if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) pw_note(present_id, l1, g_sc);
+    if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) pw_note(present_id, begin, g_sc);
 }
 static void flip_one_locked(void) { flip_one_locked_id(0); }
 
