@@ -23,10 +23,13 @@ typedef struct VkCtx {
     VkPhysicalDeviceMemoryProperties mem_props;
     uint32_t gfx_family;                    // graphics + compute + presentation on win32
     uint32_t xfer_family;                   // a transfer-only family when the GPU has one, else gfx_family
+    uint32_t of_family;                     // optional VK_NV_optical_flow family (MKW_FG_NVOF experiment)
     VkQueue gfx_queue;                      // graphics + present
     VkQueue xfer_queue;                     // equals gfx_queue when xfer_shared
     VkQueue fg_queue;                       // frame generation's (vk_framegen.c): the graphics family's second queue,
                                             // else gfx_queue; submitted to under vk_queue_lock as well
+    VkQueue of_queue;                       // dedicated optical-flow engine, NULL unless explicitly enabled
+    int has_oflow;
     int xfer_shared;                        // 1: no separate queue; serialise with gfx_queue
     VmaAllocator vma;
     VkSemaphore timeline;                   // one timeline semaphore; values are issued by vk_sync.c

@@ -250,6 +250,7 @@ typedef struct {
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT placed;
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pexe;
     VkPhysicalDevicePresentIdFeaturesKHR presentid;
+    VkPhysicalDeviceOpticalFlowFeaturesNV oflow;
 } FeatureChain;
 
 static int create_device(void) {
@@ -281,6 +282,9 @@ static int create_device(void) {
     OPTIONAL_EXT(has_provoking_vertex, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME, pv, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT);
     OPTIONAL_EXT(has_robustness2, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME, rob2, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT);
     OPTIONAL_EXT(has_device_fault, VK_EXT_DEVICE_FAULT_EXTENSION_NAME, fault, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT);
+    if (rt_knob("FG_NVOF", "0")) {
+        OPTIONAL_EXT(has_oflow, VK_NV_OPTICAL_FLOW_EXTENSION_NAME, oflow, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV);
+    }
     // Task and mesh programs; without it their draws are skipped.
     OPTIONAL_EXT(has_mesh, VK_EXT_MESH_SHADER_EXTENSION_NAME, mesh, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT);
     // A pipeline built for fewer colour targets than its pass has (depth-only draws in MKW's 6-target G-buffer pass:
@@ -411,6 +415,7 @@ static int create_device(void) {
     // (1.8-2.4 ms of GPU at 4K), and the game's fence waits pushed 4 % of its frames past 20 ms (ab-flip0, 15/11/2026).
     // NX2navi makes queues of its own for its frame generation the same way. MKW_FG_QUEUE=0: one queue.
     uint32_t gq = 1;
+    g_vk.of_family = VK_QUEUE_FAMILY_IGNORED;
     {
         uint32_t nf = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nf, NULL);
@@ -419,8 +424,13 @@ static int create_device(void) {
         vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nf, qp);
         const char *e = cfg_get("MKW_FG_QUEUE");
         if (g_vk.gfx_family < nf && qp[g_vk.gfx_family].queueCount >= 2 && !(e && !strcmp(e, "0"))) gq = 2;
+        if (g_vk.has_oflow && c->oflow.opticalFlow) {
+            for (uint32_t i = 0; i < nf; i++)
+                if (qp[i].queueCount && (qp[i].queueFlags & VK_QUEUE_OPTICAL_FLOW_BIT_NV)) { g_vk.of_family = i; break; }
+        }
+        if (g_vk.of_family == VK_QUEUE_FAMILY_IGNORED) g_vk.has_oflow = 0;
     }
-    VkDeviceQueueCreateInfo qi[2] = {
+    VkDeviceQueueCreateInfo qi[3] = {
         {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family, .queueCount = gq,
          .pQueuePriorities = prios}};
     uint32_t nqi = 1;
@@ -429,6 +439,9 @@ static int create_device(void) {
                                           .queueFamilyIndex = g_vk.xfer_family, .queueCount = 1, .pQueuePriorities = &prio};
         nqi = 2;
     }
+    if (g_vk.has_oflow && g_vk.of_family != g_vk.gfx_family && g_vk.of_family != g_vk.xfer_family)
+        qi[nqi++] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = g_vk.of_family, .queueCount = 1, .pQueuePriorities = &prio};
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &c->f2, .queueCreateInfoCount = nqi,
                              .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     vk_guard_gpu_ok();
@@ -441,6 +454,10 @@ static int create_device(void) {
     rt_log("vk: frame generation's queue: %s", gq == 2 ? "the graphics family's second" : "the game's (one queue)");
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }
+    if (g_vk.has_oflow) {
+        vkGetDeviceQueue(g_vk.device, g_vk.of_family, 0, &g_vk.of_queue);
+        rt_log("vk: hardware optical-flow queue family %u (MKW_FG_NVOF)", g_vk.of_family);
+    }
 
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT emh = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &emh};
