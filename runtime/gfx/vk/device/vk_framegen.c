@@ -62,7 +62,7 @@ static struct {
     // copies wait for fsem: they write the images the last frame's generation read (pic, hl, hpic take turns).
     VkCommandBuffer xcb[SLOTS], rec_x;   // rec_x: where vk_fg_record puts the copies (its cb when 0)
     VkSemaphore xsem, fsem;
-    uint64_t xval, fval;
+    uint64_t xval, fval, bypass_waited;
     int split;
     int luma_ok[2];                      // pic[i]'s luma levels were made (only the optical flow reads them)
     unsigned n;
@@ -845,6 +845,20 @@ static void dump_write(VkFence fence) {
            (unsigned long long)(D.at + DUMP_N - 1), dir, F.interval / 1e6);
 }
 
+// Active generation's xcb chain protects the temporal input ring. Bypass frames have no xcb, so the first one must
+// leave a device-side wait before later graphics frames can wrap that ring. This adds no wait to steady generation.
+static void bypass_order(void) {
+    if (!F.split || !F.fsem || F.fval <= F.bypass_waited) return;
+    VkSemaphoreSubmitInfo wait = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = F.fsem,
+        .value = F.fval, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = 1, .pWaitSemaphoreInfos = &wait};
+    vk_queue_lock();
+    VkResult r = vkQueueSubmit2(vk_ctx()->gfx_queue, 1, &si, VK_NULL_HANDLE);
+    vk_queue_unlock();
+    if (r == VK_SUCCESS) F.bypass_waited = F.fval;
+    else rt_log("vk: frame generation bypass ordering failed (%d)", (int)r);
+}
+
 int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkImage out[VK_FG_MAX], int *w, int *h,
                 uint64_t *step) {
     // the game's frame interval: an average of the pacer's display times, a hitch left out
@@ -858,6 +872,7 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
     F.last_at = at;
     int m = mult_now();
     if (m < 2) {   // off, or auto with no room between two refreshes: the caller presents the game's picture
+        bypass_order();
         F.have_prev = 0;
         return 0;
     }
@@ -868,6 +883,7 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
     unsigned slot = F.n++ % SLOTS;
     if (vkWaitForFences(c->device, 1, &F.fence[slot], VK_TRUE, 5000000000ull) != VK_SUCCESS) {
         rt_log("vk: frame generation: fence wait timed out");
+        bypass_order();
         return 0;
     }
     VkCommandBuffer cb = F.cb[slot];
@@ -899,7 +915,10 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
     if (F.qp) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, F.qp, 2 * slot + 1), F.q_used[slot] = n > 0;
     int dump = n && dump_record(cb, out, n, *w, *h, F.compare_native);
     vkEndCommandBuffer(cb);
-    if (!n) return 0;   // (recorded nothing the GPU must run: the command buffer is reset next time)
+    if (!n) {   // recorded nothing; preserve ordering when normal graphics resumes without a copy submission
+        bypass_order();
+        return 0;
+    }
     vkResetFences(c->device, 1, &F.fence[slot]);
     VkCommandBufferSubmitInfo cbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cb};
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbi};
