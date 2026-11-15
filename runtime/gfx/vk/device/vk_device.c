@@ -11,6 +11,7 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "vk_latency.h"
 #include "vk_temporal.h"
 #include "vk.h"
 #include "vk_defaults.h"
@@ -248,6 +249,7 @@ typedef struct {
     VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR lr;
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT placed;
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pexe;
+    VkPhysicalDevicePresentIdFeaturesKHR presentid;
 } FeatureChain;
 
 static int create_device(void) {
@@ -348,6 +350,11 @@ static int create_device(void) {
         CHAIN(gpl, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT);
     }
     vk_tmp_device_exts(ep, ne, ext, &n_ext, 48);   // NGX's (vk_temporal.c)
+    // NVIDIA Reflex (vk_latency.c): VK_NV_low_latency2, and VK_KHR_present_id so its markers name the presents
+    for (uint32_t i = 0; i < ne; i++)
+        if (!strcmp(ep[i].extensionName, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) && n_ext < 46)
+            g_vk.low_latency2_spec = ep[i].specVersion, ext[n_ext++] = VK_NV_LOW_LATENCY_2_EXTENSION_NAME;
+    OPTIONAL_EXT(has_present_id, VK_KHR_PRESENT_ID_EXTENSION_NAME, presentid, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR);
     free(ep);
 
     // The driver fills the chain with what it supports; the same chain then enables all of it (robustBufferAccess
@@ -382,6 +389,7 @@ static int create_device(void) {
     else if (!h->geometryShader) miss = "geometryShader";
     else if (!h->textureCompressionBC) miss = "textureCompressionBC";
     if (miss) { rt_log("vk: required feature missing on %s: %s", g_vk.props.deviceName, miss); free(c); return 0; }
+    if (g_vk.has_present_id && !c->presentid.presentId) g_vk.has_present_id = 0;
     g_vk.has_buffer_device_address = c->f12.bufferDeviceAddress;
     g_vk.has_placed = has_placed && c->placed.memoryMapPlaced && c->placed.memoryUnmapReserve;
     c->placed.memoryMapRangePlaced = VK_FALSE;   // whole allocations only
@@ -516,6 +524,7 @@ static long g_errors_total;     // outlives the device so the probe can print it
 
 static void destroy_all(void) {
     gfx_window_release_vk();
+    vk_lat_shutdown();
     if (g_vk.device) vkDeviceWaitIdle(g_vk.device);
     if (g_vk.device) vk_astc_release(), vk_crumbs_release(), vk_tmp_shutdown();
     if (g_vk.timeline) vkDestroySemaphore(g_vk.device, g_vk.timeline, NULL);
@@ -539,7 +548,8 @@ int vk_init(void) {
     if (!g_ready) {
         memset(&g_vk, 0, sizeof g_vk);
         if (create_instance() && pick_device() && create_device())
-            g_ready = 1, vk_crumbs_init(), vk_headroom_start(), vk_tex_pool_start(), vk_tmp_device_init();
+            g_ready = 1, vk_crumbs_init(), vk_headroom_start(), vk_tex_pool_start(), vk_tmp_device_init(),
+            vk_lat_init(g_vk.low_latency2_spec);
         else destroy_all();
     }
     int ok = g_ready;

@@ -54,6 +54,8 @@ typedef struct VkCtx {
     // VK_FEEDBACK_RESTART (the pass ends and restarts behind the full barrier).
     int feedback;                           // VK_FEEDBACK_*
     uint32_t min_imported_host_alignment;   // VK_EXT_external_memory_host
+    int has_present_id;                     // VK_KHR_present_id with presentId: Reflex's markers name the presents
+    uint32_t low_latency2_spec;             // VK_NV_low_latency2's revision when enabled (Reflex, vk_latency.c), else 0
     int device_index;                       // index in vkEnumeratePhysicalDevices
 } VkCtx;
 enum { VK_FEEDBACK_OFF, VK_FEEDBACK_RESTART, VK_FEEDBACK_LAYOUT };
@@ -106,6 +108,7 @@ void vk_hdr_ui_compose(VkCommandBuffer cb, VkImageView dst_view, VkFormat fmt, u
 void vk_hdr_ui_release(void);   // before the device goes away
 // Queues the oldest present vk_present_blit or vk_present_blit_ahead left waiting.
 void vk_present_flip(void);
+void vk_present_flip_id(uint64_t present_id);   // the same with a VkPresentIdKHR (Reflex, vk_latency.c), 0 none
 // vk_present_blit for frame generation: presents already waiting stay waiting, so the frames of one game frame are
 // all blitted at once and each vk_present_flip then queues the next at its time.
 void vk_present_blit_ahead(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]);

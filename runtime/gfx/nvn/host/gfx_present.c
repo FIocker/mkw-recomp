@@ -13,6 +13,7 @@
 // The in-game menu (ui/menu/menu.h) draws over the game image in the present's command buffer, after the blit. The window's
 // size and fullscreen state are the settings MKW_WINDOW_SIZE and MKW_FULLSCREEN, which the back end applies at start
 // and whenever a cfg_set changes them (window_settings_live -> gfx_window_apply_settings).
+#include "vk_latency.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -270,7 +271,7 @@ static VkPresentModeKHR pick_present_mode(VkPhysicalDevice pd) {
 const char *gfx_window_present_mode(void) { return __atomic_load_n(&g_present_got, __ATOMIC_ACQUIRE); }
 
 // Queues the oldest present a blit left waiting (g_pl held).
-static void flip_one_locked(void) {
+static void flip_one_locked_id(uint64_t present_id) {
     if (!g_flip_n) return;
     uint32_t idx = g_flip_q[0];
     g_flip_n--;
@@ -279,11 +280,14 @@ static void flip_one_locked(void) {
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
                            .pWaitSemaphores = &g_render_done[idx], .swapchainCount = 1, .pSwapchains = &g_sc,
                            .pImageIndices = &idx};
+    VkPresentIdKHR pid = {.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR, .swapchainCount = 1, .pPresentIds = &present_id};
+    if (present_id && vk_ctx()->has_present_id) pi.pNext = &pid;   // Reflex (vk_latency.c)
     vk_queue_lock();
     VkResult r = vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
     vk_queue_unlock();
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
 }
+static void flip_one_locked(void) { flip_one_locked_id(0); }
 
 // Queues every waiting present (g_pl held). A swapchain rebuild and the next blit (not an ahead one) flush them first;
 // the device release drops them.
@@ -348,6 +352,8 @@ static int create_swapchain(void) {
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = pick_present_mode(c->phys), .clipped = VK_TRUE,
         .oldSwapchain = old};
+    VkSwapchainLatencyCreateInfoNV lat;
+    ci.pNext = vk_lat_swapchain_pnext(&lat, ci.pNext);   // Reflex's low-latency mode allowed (vk_latency.c)
     VkResult r = vkCreateSwapchainKHR(c->device, &ci, NULL, &g_sc);
     if (r != VK_SUCCESS) {
         rt_log("gfx: vkCreateSwapchainKHR failed (%d)", (int)r);
@@ -360,7 +366,8 @@ static int create_swapchain(void) {
         if (g_sc_view[i]) vkDestroyImageView(c->device, g_sc_view[i], NULL);
         g_sc_view[i] = VK_NULL_HANDLE;
     }
-    if (old) vkDestroySwapchainKHR(c->device, old, NULL);
+    if (old) vk_lat_swapchain_destroying(old), vkDestroySwapchainKHR(c->device, old, NULL);
+    vk_lat_swapchain_created(g_sc);
     gfx_hdr_metadata(g_sc);
     g_sc_fmt = sf.format;
     g_sc_hdr = sf.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT;
@@ -816,6 +823,12 @@ void vk_present_flip(void) {
     plat_rmutex_unlock(&g_pl);
 }
 
+void vk_present_flip_id(uint64_t present_id) {
+    plat_rmutex_lock(&g_pl);
+    flip_one_locked_id(present_id);
+    plat_rmutex_unlock(&g_pl);
+}
+
 void gfx_window_resize(int cw, int chh) {
     gfx_window_start();
     wsys_resize(cw, chh);
@@ -849,7 +862,7 @@ void gfx_window_release_vk(void) {
             g_sc_view[i] = VK_NULL_HANDLE;
         }
         if (g_pool) vkDestroyCommandPool(c->device, g_pool, NULL);
-        if (g_sc) vkDestroySwapchainKHR(c->device, g_sc, NULL);
+        if (g_sc) vk_lat_swapchain_destroying(g_sc), vkDestroySwapchainKHR(c->device, g_sc, NULL);
         if (g_surface) vkDestroySurfaceKHR(c->instance, g_surface, NULL);
         g_sc = VK_NULL_HANDLE; g_surface = VK_NULL_HANDLE; g_pool = VK_NULL_HANDLE; g_sc_n = 0;
         g_started = 0;     // the window and its thread stay; the next gfx_window_start makes a new surface

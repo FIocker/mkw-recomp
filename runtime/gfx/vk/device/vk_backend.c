@@ -27,6 +27,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
+#include "vk_latency.h"
 #include "vk_temporal.h"
 #include "vk.h"
 #include "vk_exec.h"
@@ -87,7 +88,9 @@ static void present_main(void *arg) {
         uint64_t target = nf ? first + (uint64_t)(nf - 1) * step : j.at;
         wait_until(target);
         uint64_t t1 = kern_now_ns();
-        vk_present_flip();
+        uint64_t pid = vk_lat_present_start(j.frame);   // Reflex: the game frame's present carries its id
+        vk_present_flip_id(pid);
+        vk_lat_present_end(pid);
         // MKW_TRACE=present: one line per present: the host present's interval, the interval of the game's present
         // calls (when the host present went out before back-edge pacing), the wait and how far past its target it went;
         // with frame generation, the game's frame and how many were shown before it
@@ -121,6 +124,7 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     vk_spec_frame(frame);
     vk_exec_present_note(frame);   // before vk_exec_frame_log, which resets the frame's draw counts
     vk_tmp_present(frame);         // the temporal upscalers' frame boundary (vk_temporal.c)
+    vk_lat_submitted(frame);       // Reflex: the frame's work is recorded (vk_latency.c)
     vk_exec_frame_log(t, frame);
     vk_mem_census(frame);
     if (vk_dump_armed) vk_dump_present(frame);
@@ -189,6 +193,12 @@ static PlatCond rcv = PLAT_COND_INIT;   // item queued, item taken, item done
 static ReplayItem rq[RQ_CAP];
 static int rq_head, rq_n, r_busy, r_started;
 static uint64_t r_presents_queued, r_presents_done, r_submit_done, game_frames;
+
+// The id of the frame the game thread is about to simulate: the number its present will get (vk_be_present).
+uint64_t vk_be_next_frame_id(void) {
+    return (gfx_replay_async() ? __atomic_load_n(&game_frames, __ATOMIC_RELAXED)
+                               : __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED)) + 1;
+}
 // Under rl: calls, calls that waited and the time waited per cause, since the last replay_log line and over the run.
 static uint64_t dr_calls[DR_N], dr_waits[DR_N], dr_ns[DR_N], dr_tcalls[DR_N], dr_twaits[DR_N], dr_tns[DR_N];
 // MKW_REPLAY_CHECK: ReadTexels compared with a read after a full drain (under rl): checked, differing, differing

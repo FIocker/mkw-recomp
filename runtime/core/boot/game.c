@@ -13,6 +13,7 @@
 #include <stdatomic.h>
 #include <string.h>
 
+#include "vk_latency.h"
 #include "cfg.h"
 #include "host.h"
 #include "version.h"
@@ -95,8 +96,11 @@ static void host_frame_update(Cpu *c) {
         saved = -1;
         rt_log("game: present interval chosen by the game again (MKW_FPS auto)");
     }
-    uint64_t obj = c->x[0], t0 = kern_now_ns();
+    uint64_t obj = c->x[0];
+    vk_lat_frame_start(vk_be_next_frame_id());   // NVIDIA Reflex: its sleep, then the simulation starts (vk_latency.c)
+    uint64_t t0 = kern_now_ns();
     rt_call(c, rt_main_addr(rt_version()->frame_update), 1, obj);
+    vk_lat_frame_end();
     frame_trace(obj, t0);
 }
 
