@@ -20,6 +20,7 @@
 
 static float motion_x = -4, motion_y = 2;
 static int opaque_shadow;
+static int still_images;
 static uint16_t half(float value) {
     uint32_t bits;
     memcpy(&bits, &value, sizeof bits);
@@ -30,6 +31,7 @@ static uint16_t half(float value) {
 static int body(int x, int y) { return x >= 104 && x < 152 && y >= 28 && y < 78; }
 static int shadow(int x, int y) { return x >= 88 && x < 168 && y >= 76 && y < 98; }
 static uint8_t channel(int x, int y, double t, int k) {
+    if (still_images) t = 0;
     if (body(x, y)) return (uint8_t)(60 + ((x * (k + 3) + y * (k + 5)) % 160));
     if (opaque_shadow && shadow(x,y)) return 32;
     double xx = x + motion_x * t, yy = y + motion_y * t;
@@ -65,6 +67,8 @@ int probe_fsr_fg(void) {
     CHECK(!strcmp(mode, "geometry") || !strcmp(mode, "image") || !strcmp(mode, "zero"));
     const char *opaque = cfg_get("MKW_FSR_PROBE_OPAQUE");
     opaque_shadow = opaque && strcmp(opaque,"0");
+    const char *still = cfg_get("MKW_FSR_PROBE_STILL");
+    still_images = still && strcmp(still,"0");
     const char *shift = cfg_get("MKW_FSR_PROBE_SHIFT");
     if (shift) {
         CHECK(sscanf(shift,"%f,%f",&motion_x,&motion_y) == 2);
@@ -147,6 +151,8 @@ int probe_fsr_fg(void) {
         in.cam[0] = in.cam[5] = in.cam[10] = 1;
         VkTmpPic color = {images[0],views[0],formats[0],W,H}, out = {images[3],views[3],formats[3],W,H};
         CHECK(vk_tmp_ffx_fg(cb, &in, &color, NULL, &out));
+        // Experimental provider pipelines must pass shader/descriptor validation before any of their work is submitted.
+        CHECK(!vk_validation_errors_total());
         barrier(cb);
         VkBufferImageCopy cp = {.bufferOffset = BYTES * 3,
             .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}, .imageExtent = {W,H,1}};
@@ -173,6 +179,7 @@ int probe_fsr_fg(void) {
     }
     printf("probe-fsr-fg: %s vectors (%.0f,%.0f), %s shadow, analytical midpoint after 20 frames; validation errors %ld\n",
         mode,motion_x,motion_y,opaque_shadow?"opaque":"textured",vk_validation_errors_total());
+    if (still_images) printf("probe-fsr-fg: identical endpoint images; injected nonzero world vectors intentionally inconsistent\n");
     const char *names[3] = {"body", "shadow", "road"};
     for (int i = 0; i < 3; i++) printf("probe-fsr-fg: %s mean RGB error %.3f /255, >24 max-RGB %d/%d\n",
         names[i], error[i]/(3*count[i]), bad[i], count[i]);

@@ -54,6 +54,10 @@ opaque patch with unambiguous zero image motion. `MKW_FSR_PROBE_OUT=<file.ppm>` 
 `MKW_FSR_PROBE_SHADOW_LIMIT=2` enables a quality gate against the analytical midpoint, in addition to the integration
 check. On provider 3.1.6, the opaque image-motion case passes at `(0,-8)` but fails at `(0,-64)`: the body remains exact,
 while shadow mean error rises from 0.225 to 41.429 levels of 255. A successful SDK dispatch alone is not quality acceptance.
+`MKW_FSR_PROBE_STILL=1` freezes the endpoint images while retaining the injected motion, intentionally testing an
+inconsistent game field against stationary SDK optical flow. `MKW_FFX_LIBRARY=<absolute DLL path>` selects an isolated
+experimental API provider; a failed explicit load does not fall back to the installed DLL. An FG-only provider cannot
+also supply FSR upscaling through this override.
 
 Experimental motion controls default off: `MKW_FG_NVOF` uses the Vulkan hardware optical-flow queue on supported NVIDIA
 devices; `MKW_FG_NVOF_GRID=1|2|4` changes its vector grid (default 4). `MKW_FG_NVOF_GEOMETRY`, `MKW_FG_NVOF_REFINE`, and
