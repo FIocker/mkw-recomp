@@ -28,6 +28,12 @@ int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs);
 int vk_tmp_dispatch(VkExec *ex, const GfxShader *cs);
 void vk_tmp_viewport(const VkExec *ex, VkViewport *v);
 void vk_tmp_present(uint64_t frame);   // the replay thread, at each game present
+void vk_tmp_present_size(uint32_t w, uint32_t h);   // the size of the picture that present shows (the game output)
+// The screen target at the game output's size (vk_temporal.c): a colour target the frame's upscale replaced
+// (vk_exec_rt.c resolve_rt), the viewport and scissor of passes into it, a texture that samples it (vk_exec_view.c)
+int vk_tmp_target(VkExecTarget *t);
+void vk_tmp_scale_rect(const VkExec *ex, float *x, float *y, float *w, float *h);
+void vk_tmp_sampled(VkImage *image, VkImageView *view);
 
 // What the last evaluation left for frame generation (vk_framegen.c): depth and motion vectors at the render size, the
 // jitter, and whether the history was reset. 0 when the frame had no temporal upscale.

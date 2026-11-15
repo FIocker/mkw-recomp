@@ -125,6 +125,7 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     vk_spec_frame(frame);
     vk_exec_present_note(frame);   // before vk_exec_frame_log, which resets the frame's draw counts
     vk_tmp_present(frame);         // the temporal upscalers' frame boundary (vk_temporal.c)
+    if (t) vk_tmp_present_size(t->d.width, t->d.height);
     vk_lat_submitted(frame);       // Reflex: the frame's work is recorded (vk_latency.c)
     vk_exec_frame_log(t, frame);
     vk_mem_census(frame);

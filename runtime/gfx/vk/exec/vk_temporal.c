@@ -355,6 +355,7 @@ static struct {
     Img depth;                   // the scene's depth (passes with the camera block)
     Img pre;                     // the tonemapped scene before SMAA (the SMAA blend's tex slot 0)
     VkImage smaa_out;            // the SMAA blend's target: what the game's upscale dispatch reads
+    uint64_t upscale_frame;      // the last frame with the game's upscale dispatch
     int done;                    // the upscaler ran this frame
     uint64_t frame;              // the game frame being recorded (presents so far)
     // jitter: decided at the present before the frame
@@ -519,7 +520,9 @@ int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     if (!T.cam_ok) return 1;
     // native: is this the screen target? The screen target is the one the HUD draws into, of the screen's size; the
     // blend into a target of the scene's size followed by the upscale dispatch is told apart by MKW_TEMPORAL_QUALITY.
-    if (romfs_resolution_scene_permille() < 1000) return 1;
+    // with the game's upscale dispatch in the recent frames, the blend writes the scene's own target and the dispatch
+    // follows (vk_tmp_dispatch); else the blend writes the screen target and the upscaler goes here
+    if (T.upscale_frame && T.frame - T.upscale_frame < 30) return 1;
     Img out = {ex->color[0].image, ex->color[0].format, VK_IMAGE_ASPECT_COLOR_BIT,
                ex->color[0].img ? ex->color[0].img->usage : 0, ex->color[0].width, ex->color[0].height, NULL};
     return run_upscaler(ex, &pre, &out, 1) ? 0 : 1;
@@ -543,6 +546,7 @@ int vk_tmp_dispatch(VkExec *ex, const GfxShader *cs) {
     if (!img_of(ex, ex->tex[NVN_STAGE_CS][0], &in) || in.image != T.smaa_out) return 0;
     T.smaa_out = VK_NULL_HANDLE;
     if (!img_of(ex, ex->img[NVN_STAGE_CS][1], &out) || out.w <= in.w || out.h <= in.h) return 0;
+    T.upscale_frame = T.frame;
     uint64_t hh = spv_hash(cs);
     static uint64_t told[8];
     for (int i = 0; i < 8; i++) {
@@ -563,6 +567,7 @@ typedef struct {
     VkImageView view;
     uint32_t w, h;
     VkFormat fmt;
+    VkImageUsageFlags usage;
 } Own;
 
 static struct {
@@ -573,6 +578,7 @@ static struct {
     VkSampler samp;
     PFN_vkCmdPushDescriptorSetKHR push;
     Own outimg;
+    Own big;                     // the screen target at the game output's size (the retarget, below)
     Own mvs[3], zs[3];             // the motion vectors and depth of the last three evaluations (frame generation reads
                                  // a frame's after the replay has gone on to the next ones)
 } R = {.ok = -1};
@@ -599,9 +605,14 @@ static int own_image(Own *o, uint32_t w, uint32_t h, VkFormat f) {
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f,
                             .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
                             .tiling = VK_IMAGE_TILING_OPTIMAL,
-                            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                     VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(c->phys, f, &fp);
+    if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) ci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    o->usage = ci.usage;
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     if (vmaCreateImage(c->vma, &ci, &ai, &o->img, &o->mem, NULL) != VK_SUCCESS) return 0;
     VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img,
@@ -684,6 +695,53 @@ static int res_init(void) {
 fail:
     rt_log("temporal: the motion vector pass could not be set up: the game's own upscaling");
     return 0;
+}
+
+// ---------------------------------------------------------------- the screen target at the output's size
+// MKW caps its screen target (where the upscale writes and the HUD is drawn) at 1440 lines, and its last pass scales it
+// to the game output (MKW_RESOLUTION 2160: 3840x2160). With MKW_TEMPORAL_RETARGET (on by default) and an output larger
+// than the screen target, the upscaler writes an image of the output's size instead (R.big), and for the rest of the
+// frame that image stands in for the screen target: the passes that draw into it (the HUD) draw into the big one with
+// their viewport and scissor scaled (vk_tmp_target, vk_tmp_scale_rect), and the draws that sample it (the last pass)
+// sample the big one (vk_tmp_sampled). So the upscaler's picture and the HUD reach the output at its own resolution.
+static struct {
+    int on;                      // this frame: R.big stands in for src
+    VkImage src;                 // the game's screen target
+    uint32_t sw, sh;             // its size
+    uint32_t ow, oh;             // the game output's size, as the last present showed it
+    uint64_t swaps, frames;
+} RT;
+
+void vk_tmp_present_size(uint32_t w, uint32_t h) { RT.ow = w, RT.oh = h; }
+
+int vk_tmp_target(VkExecTarget *t) {
+    if (!RT.on || !t->image || t->image != RT.src) return 0;
+    t->image = R.big.img;
+    t->img = NULL;   // view_of makes the view for the command buffer
+    t->width = R.big.w, t->height = R.big.h;
+    t->level = 0, t->base_layer = 0, t->layers = 1;
+    RT.swaps++;
+    return 1;
+}
+
+void vk_tmp_scale_rect(const VkExec *ex, float *x, float *y, float *w, float *h) {
+    if (!RT.on || ex->color[0].image != R.big.img || !RT.sw || !RT.sh) return;
+    float sx = (float)R.big.w / (float)RT.sw, sy = (float)R.big.h / (float)RT.sh;
+    *x *= sx, *w *= sx, *y *= sy, *h *= sy;
+}
+
+void vk_tmp_sampled(VkImage *image, VkImageView *view) {
+    if (!RT.on || *image != RT.src || !R.big.view) return;
+    *image = R.big.img;
+    *view = R.big.view;
+}
+
+static int retarget_wanted(uint32_t sw, uint32_t sh) {
+    static int on = -1;
+    if (on < 0) on = cfg_get("MKW_TEMPORAL_RETARGET") ? strcmp(cfg_get("MKW_TEMPORAL_RETARGET"), "0") != 0 : 1;
+    if (!on || !RT.ow || !RT.oh || RT.oh <= sh || RT.ow <= sw) return 0;
+    double a = (double)RT.ow / RT.oh, b = (double)sw / sh;   // the same picture, larger: the same shape
+    return a / b < 1.01 && b / a < 1.01;
 }
 
 // ---------------------------------------------------------------- matrices
@@ -834,6 +892,8 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
     }
     if (!res_init()) return 0;
     uint32_t w = color->w, h = color->h, ow = out->w, oh = out->h;
+    int big = retarget_wanted(out->w, out->h);
+    if (big) ow = RT.ow, oh = RT.oh;
     // the camera: this frame's and the game's own copy of the previous frame's view-projection
     double vp[16], vpp[16], ivp[16], m[16];
     rows4(T.cam, 3, vp);
@@ -956,8 +1016,17 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
         barrier_all(cb);
         VkImageBlit bl = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)ow, (int32_t)oh, 1}},
                           {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)ow, (int32_t)oh, 1}}};
-        vkCmdBlitImage(cb, R.outimg.img, VK_IMAGE_LAYOUT_GENERAL, out->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
-                       VK_FILTER_NEAREST);
+        VkImage dst = out->image;
+        if (big && own_image(&R.big, ow, oh, out->format) && (R.big.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+            dst = R.big.img;   // the screen target at the output's size from here to the frame's end
+            RT.on = 1, RT.src = out->image, RT.sw = out->w, RT.sh = out->h;
+            RT.frames++;
+        } else if (big) {
+            // no big target: the upscaler's picture is scaled down into the game's
+            bl.dstOffsets[1] = (VkOffset3D){(int32_t)out->w, (int32_t)out->h, 1};
+        }
+        vkCmdBlitImage(cb, R.outimg.img, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+                       VK_FILTER_LINEAR);
         barrier_all(cb);
         T.reset = 0;
         T.done = 1;
@@ -1014,6 +1083,10 @@ void vk_tmp_present(uint64_t frame) {
     plat_mutex_unlock(&tlock);
     T.pre = (Img){0};
     T.smaa_out = VK_NULL_HANDLE;
+    RT.on = 0;
+    if (frame % 1800 == 0 && RT.frames)
+        rt_log("temporal: the screen target at %ux%u in %llu frames (%llu passes moved there)", R.big.w, R.big.h,
+               (unsigned long long)RT.frames, (unsigned long long)RT.swaps);
     if (!T.done) T.jdepth = VK_NULL_HANDLE;   // no upscale this frame: nothing to jitter for
     T.done = 0;
     T.frame = frame + 1;
@@ -1033,8 +1106,8 @@ void vk_tmp_shutdown(void) {
     if (F.feat && N.release) N.release(F.feat), F.feat = NULL;
     dlssg_release();
     vk_tmp_ffx_shutdown();
-    Own *o[7] = {&R.mvs[0], &R.mvs[1], &R.mvs[2], &R.outimg, &R.zs[0], &R.zs[1], &R.zs[2]};
-    for (int i = 0; i < 7; i++)
+    Own *o[8] = {&R.mvs[0], &R.mvs[1], &R.mvs[2], &R.outimg, &R.zs[0], &R.zs[1], &R.zs[2], &R.big};
+    for (int i = 0; i < 8; i++)
         if (o[i]->img) vkDestroyImageView(c->device, o[i]->view, NULL), vmaDestroyImage(c->vma, o[i]->img, o[i]->mem), *o[i] = (Own){0};
     if (N.up && N.shutdown1) N.shutdown1(c->device), N.up = 0;
 }
