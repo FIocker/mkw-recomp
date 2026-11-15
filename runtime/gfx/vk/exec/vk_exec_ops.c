@@ -12,6 +12,7 @@
 #include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "tex.h"
+#include "vk_temporal.h"
 #include "vk.h"
 #include "vk_draw_internal.h"
 #include "vk_exec.h"
@@ -264,6 +265,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     int present;
     const GfxShader *cs = shader_for(ex, NVN_STAGE_CS, &present);   // synchronous: a skipped dispatch changes results
     if (!cs) return;
+    if (vk_tmp_dispatch(ex, cs)) return;   // DLSS or FSR 3.1 in the place of the game's upscale (vk_temporal.c)
     const VkPipeInfo *info = NULL;
     VkPipeline p = vk_pipeline_compute(cs, &info);
     if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");

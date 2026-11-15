@@ -27,6 +27,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
+#include "vk_temporal.h"
 #include "vk.h"
 #include "vk_exec.h"
 #include "platform/platform.h"
@@ -119,6 +120,7 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     if (vk_pt_on()) vk_pt_frame(frame);
     vk_spec_frame(frame);
     vk_exec_present_note(frame);   // before vk_exec_frame_log, which resets the frame's draw counts
+    vk_tmp_present(frame);         // the temporal upscalers' frame boundary (vk_temporal.c)
     vk_exec_frame_log(t, frame);
     vk_mem_census(frame);
     if (vk_dump_armed) vk_dump_present(frame);

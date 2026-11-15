@@ -1,0 +1,978 @@
+// Temporal upscaling: NVIDIA DLSS Super Resolution (MKW_TEMPORAL=dlss) and AMD FSR 3.1 (=fsr3) in the place of the
+// game's own upscale pass.
+//
+// Where it runs (measured with MKW_DUMP in races, 15/11/2026). MKW renders its 3D scene and its screen (HUD, menus) at
+// two resolutions of its own, from GamePerformanceGraphicsConfigGParam (romfs_res.c): with the 3D lines below the
+// screen's, the frame is the scene into an R11G11B10F light target with a D32FS8 depth, bloom, the tonemap pass, SMAA
+// (agl's three passes: edges, weights, blend, fs a1becfadc5da81ad / 68b69c76ad2d7905 / 138f5b8eb8a6b9e0), then one
+// compute dispatch (cs 5d920a71d444c084: tex slot 0 the anti-aliased scene, img slot 1 the screen-size target) scales
+// the scene into the screen target, and the HUD is drawn over it. With the 3D lines equal to the screen's there is no
+// dispatch: the SMAA blend writes the screen target itself. The upscaler takes the place of that dispatch, or of the
+// SMAA blend (native: DLAA, FSR 3.1 native AA), with the tonemapped scene before SMAA as its colour (the SMAA blend's
+// tex slot 0), so the HUD stays sharp and is never jittered or upscaled.
+//
+// Jitter: the draws that read the scene's camera block (below) and draw into last frame's scene depth get a sub-pixel
+// offset of their viewport (vk_tmp_viewport), a Halton (2, 3) sequence of 8 x the area ratio phases.
+//
+// Motion vectors: the scene's camera block (vertex c4, 0x980 bytes) holds this frame's and the previous frame's
+// matrices: rows 0-2 view, 3-6 view-projection, 7-10 projection, 11-13 inverse view, 14 near and far, 18 the render
+// size, and rows 21-31 the previous frame's view, view-projection and projection. shaders/tmp_mv.comp reprojects every
+// depth pixel through prev = VP_prev * inverse(VP_this) (built here in double precision). The camera of the player's
+// kart moves with it: MKW_TEMPORAL_KART (default on) keeps the pixels of the kart (close to the camera, bottom middle)
+// still instead of moving them like the ground.
+//
+// Every DLSS or FFX call records into the replay's command buffer after the recorder thread has made every call queued
+// before it (rec_drain): they record with their own function pointers, not through the ring. The replay's memo of what
+// is bound is dropped afterwards (vk_exec_draw_forget).
+//
+// NGX is the driver's own (_nvngx.dll, found through the registry), the DLSS model nvngx_dlss.dll next to the
+// executable; no NVIDIA SDK code or header is compiled in: the few NGX types used are declared here from its ABI, and
+// its parameter object's virtual functions are called through their vtable slots (MSVC's order of the overloads),
+// checked with a set-then-get round trip at start.
+#ifdef _WIN32
+#include <windows.h>
+#endif
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+
+#include "cfg.h"
+#include "host.h"
+#include "nvn_api.h"
+#include "platform/platform.h"
+#include "tmp_mv_spv.h"
+#include "vk.h"
+#include "vk_draw_internal.h"
+#include "vk_exec.h"
+#include "vk_rec.h"
+#include "vk_temporal.h"
+
+// ---------------------------------------------------------------- settings
+
+static const struct { const char *name; int permille; } qualities[] = {
+    {"native", 1000}, {"quality", 667}, {"balanced", 580}, {"performance", 500}, {"ultra", 333},
+};
+
+int vk_tmp_engine(void) {
+    const char *v = cfg_value("MKW_TEMPORAL");
+    return !strcmp(v, "dlss") ? VK_TMP_DLSS : !strcmp(v, "fsr3") ? VK_TMP_FSR3 : VK_TMP_OFF;
+}
+
+int vk_tmp_scene_permille(void) {
+    if (vk_tmp_engine() == VK_TMP_OFF) return 0;
+    const char *q = cfg_value("MKW_TEMPORAL_QUALITY");
+    for (size_t i = 0; i < sizeof qualities / sizeof *qualities; i++)
+        if (!strcmp(q, qualities[i].name)) return qualities[i].permille;
+    return 667;
+}
+
+// ---------------------------------------------------------------- NGX ABI
+typedef int NgxResult;   // NVSDK_NGX_Result: 1 success, 0xBAD00000 | n failures
+#define NGX_OK(r) (((unsigned)(r) & 0xFFF00000u) != 0xBAD00000u)
+#define NGX_VERSION_API 0x15
+#define NGX_FEATURE_SUPERSAMPLING 1
+#define NGX_APP_ID 231313132ull   // the id NVIDIA's samples use for builds without an issued one
+typedef struct NgxParam NgxParam;
+typedef struct NgxHandle NgxHandle;
+typedef struct { void *slot[17]; } NgxParamVtbl;
+struct NgxParam { const NgxParamVtbl *vt; };
+typedef struct {   // NVSDK_NGX_ImageViewInfo_VK
+    VkImageView view;
+    VkImage image;
+    VkImageSubresourceRange range;
+    VkFormat format;
+    unsigned width, height;
+} NgxImageView;
+typedef struct {   // NVSDK_NGX_Resource_VK
+    union { NgxImageView img; struct { VkBuffer buffer; unsigned bytes; } buf; } r;
+    int type;      // 0 image view, 1 buffer
+    _Bool rw;
+} NgxResourceVK;
+typedef NgxResult (*PFN_NgxInit)(unsigned long long app, const wchar_t *path, VkInstance, VkPhysicalDevice, VkDevice,
+                                 PFN_vkGetInstanceProcAddr, PFN_vkGetDeviceProcAddr, int version, const void *info);
+typedef NgxResult (*PFN_NgxReqExt)(unsigned *ni, const char ***ie, unsigned *nd, const char ***de);
+typedef NgxResult (*PFN_NgxParams)(NgxParam **);
+typedef NgxResult (*PFN_NgxDestroyParams)(NgxParam *);
+typedef NgxResult (*PFN_NgxCreate)(VkCommandBuffer, int feature, NgxParam *, NgxHandle **);
+typedef NgxResult (*PFN_NgxEvaluate)(VkCommandBuffer, const NgxHandle *, const NgxParam *, void *callback);
+typedef NgxResult (*PFN_NgxRelease)(NgxHandle *);
+typedef NgxResult (*PFN_NgxShutdown1)(VkDevice);
+
+// The parameter object's vtable, MSVC's layout: each group of overloads in reverse declaration order (the SDK declares
+// Set(u64), Set(float), Set(double), Set(u32), Set(int), Set(ID3D11Resource *), Set(ID3D12Resource *), Set(void *),
+// then the Get overloads in the same order).
+enum { S_P = 0, S_D12, S_D11, S_I, S_U32, S_D, S_F, S_U64, G_P, G_D12, G_D11, G_I, G_U32, G_D, G_F, G_U64 };
+typedef void (*SetI)(NgxParam *, const char *, int);
+typedef void (*SetU)(NgxParam *, const char *, unsigned);
+typedef void (*SetF)(NgxParam *, const char *, float);
+typedef void (*SetP)(NgxParam *, const char *, void *);
+typedef NgxResult (*GetI)(const NgxParam *, const char *, int *);
+typedef NgxResult (*GetU)(const NgxParam *, const char *, unsigned *);
+typedef NgxResult (*GetF)(const NgxParam *, const char *, float *);
+typedef NgxResult (*GetP)(const NgxParam *, const char *, void **);
+static void p_seti(NgxParam *p, const char *n, int v) { ((SetI)p->vt->slot[S_I])(p, n, v); }
+static void p_setu(NgxParam *p, const char *n, unsigned v) { ((SetU)p->vt->slot[S_U32])(p, n, v); }
+static void p_setf(NgxParam *p, const char *n, float v) { ((SetF)p->vt->slot[S_F])(p, n, v); }
+static void p_setp(NgxParam *p, const char *n, void *v) { ((SetP)p->vt->slot[S_P])(p, n, v); }
+static int p_geti(const NgxParam *p, const char *n, int *v) { return NGX_OK(((GetI)p->vt->slot[G_I])(p, n, v)); }
+static int p_getu(const NgxParam *p, const char *n, unsigned *v) { return NGX_OK(((GetU)p->vt->slot[G_U32])(p, n, v)); }
+static int p_getf(const NgxParam *p, const char *n, float *v) { return NGX_OK(((GetF)p->vt->slot[G_F])(p, n, v)); }
+static int p_getp(const NgxParam *p, const char *n, void **v) { return NGX_OK(((GetP)p->vt->slot[G_P])(p, n, v)); }
+
+static struct {
+    void *core;
+    PFN_NgxInit init;
+    PFN_NgxReqExt req_ext;
+    PFN_NgxParams caps, alloc_params;
+    PFN_NgxDestroyParams destroy_params;
+    PFN_NgxCreate create;
+    PFN_NgxEvaluate evaluate;
+    PFN_NgxRelease release;
+    PFN_NgxShutdown1 shutdown1;
+    int tried, loaded, up, dlss;   // up: NGX initialised on the device; dlss: DLSS available
+    int fg_max;                    // DLSS Frame Generation: generated frames per rendered one this GPU allows, 0 none
+    NgxParam *capsp;
+} N;
+
+int vk_tmp_ngx_fg_max(void) { return N.up ? N.fg_max : 0; }
+
+#ifdef _WIN32
+// The NGX core next to the driver's Vulkan ICD, when the registry's NGXCore key is missing.
+static int ngx_dir_from_adapter(char *dir, DWORD size) {
+    HKEY cls;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}",
+                      0, KEY_READ, &cls) != ERROR_SUCCESS)
+        return 0;
+    int found = 0;
+    for (DWORD i = 0; !found; i++) {
+        char sub[64], val[MAX_PATH + 1] = {0}, probe[MAX_PATH + 32];
+        DWORD sn = sizeof sub, vn = MAX_PATH;
+        if (RegEnumKeyExA(cls, i, sub, &sn, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
+        if (RegGetValueA(cls, sub, "VulkanDriverName", RRF_RT_REG_SZ | RRF_RT_REG_MULTI_SZ, NULL, val, &vn) != ERROR_SUCCESS)
+            continue;
+        char *slash = strrchr(val, '\\');
+        if (!slash) continue;
+        *slash = 0;
+        snprintf(probe, sizeof probe, "%s\\_nvngx.dll", val);
+        if (GetFileAttributesA(probe) == INVALID_FILE_ATTRIBUTES) continue;
+        snprintf(dir, size, "%s", val);
+        found = 1;
+    }
+    RegCloseKey(cls);
+    return found;
+}
+#endif
+
+static int ngx_wanted(void) {
+    // NGX comes up whenever its core is there, so the menu can switch to DLSS without a restart: NGX's extensions
+    // cost nothing unused. MKW_TEMPORAL_NGX=0 leaves it out entirely.
+    static int w = -1;
+    if (w < 0) w = rt_knob("TEMPORAL_NGX", "1") != 0;
+    return w;
+}
+
+static int core_load(void) {
+    if (N.tried) return N.loaded;
+    N.tried = 1;
+    if (!ngx_wanted()) return 0;
+#ifdef _WIN32
+    char dir[MAX_PATH] = {0}, path[MAX_PATH + 32];
+    DWORD n = sizeof dir;
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore", "FullPath", RRF_RT_REG_SZ,
+                     NULL, dir, &n) != ERROR_SUCCESS && !ngx_dir_from_adapter(dir, sizeof dir)) {
+        rt_log("temporal: no NVIDIA NGX core on this system (not an NVIDIA driver): DLSS unavailable");
+        return 0;
+    }
+    snprintf(path, sizeof path, "%s\\_nvngx.dll", dir);
+    N.core = LoadLibraryA(path);
+    if (!N.core) {
+        rt_log("temporal: cannot load %s (error %lu): DLSS unavailable", path, GetLastError());
+        return 0;
+    }
+#define FN(f, name) N.f = (void *)GetProcAddress((HMODULE)N.core, name)
+    FN(init, "NVSDK_NGX_VULKAN_Init_Ext2");
+    FN(req_ext, "NVSDK_NGX_VULKAN_RequiredExtensions");
+    FN(caps, "NVSDK_NGX_VULKAN_GetCapabilityParameters");
+    FN(alloc_params, "NVSDK_NGX_VULKAN_AllocateParameters");
+    FN(destroy_params, "NVSDK_NGX_VULKAN_DestroyParameters");
+    FN(create, "NVSDK_NGX_VULKAN_CreateFeature");
+    FN(evaluate, "NVSDK_NGX_VULKAN_EvaluateFeature");
+    FN(release, "NVSDK_NGX_VULKAN_ReleaseFeature");
+    FN(shutdown1, "NVSDK_NGX_VULKAN_Shutdown1");
+#undef FN
+    if (!N.init || !N.req_ext || !N.caps || !N.alloc_params || !N.create || !N.evaluate || !N.release) {
+        rt_log("temporal: the NGX core %s lacks Vulkan entry points: DLSS unavailable", path);
+        return 0;
+    }
+    N.loaded = 1;
+    rt_log("temporal: NGX core %s", path);
+    return 1;
+#else
+    rt_log("temporal: DLSS is only wired on Windows in this build");
+    return 0;
+#endif
+}
+
+static int listed(const char *const *list, uint32_t n, const char *s) {
+    for (uint32_t i = 0; i < n; i++)
+        if (!strcmp(list[i], s)) return 1;
+    return 0;
+}
+
+void vk_tmp_instance_exts(const char **ext, uint32_t *n, uint32_t max) {
+    unsigned ni = 0, nd = 0;
+    const char **ie = NULL, **de = NULL;
+    if (!core_load() || !NGX_OK(N.req_ext(&ni, &ie, &nd, &de))) return;
+    for (unsigned i = 0; i < ni; i++)
+        if (!listed(ext, *n, ie[i]) && *n < max) ext[(*n)++] = ie[i], rt_log("temporal: NGX instance extension %s", ie[i]);
+}
+
+void vk_tmp_device_exts(const VkExtensionProperties *have, uint32_t nhave, const char **ext, uint32_t *n, uint32_t max) {
+    unsigned ni = 0, nd = 0;
+    const char **ie = NULL, **de = NULL;
+    if (!core_load() || !NGX_OK(N.req_ext(&ni, &ie, &nd, &de))) return;
+    for (unsigned i = 0; i < nd; i++) {
+        int ok = 0;
+        for (uint32_t k = 0; k < nhave && !ok; k++) ok = !strcmp(have[k].extensionName, de[i]);
+        if (!ok) rt_log("temporal: the device lacks %s, which NGX asks for", de[i]);
+        else if (!listed(ext, *n, de[i]) && *n < max) ext[(*n)++] = de[i];
+    }
+}
+
+static int vtable_ok(void) {
+    NgxParam *p = NULL;
+    if (!NGX_OK(N.alloc_params(&p)) || !p) return 0;
+    int i = 0;
+    unsigned u = 0;
+    float f = 0;
+    void *v = NULL;
+    p_seti(p, "MKW.Test.I", -12345);
+    p_setu(p, "MKW.Test.U", 4000000000u);
+    p_setf(p, "MKW.Test.F", 1.25f);
+    p_setp(p, "MKW.Test.P", (void *)p);
+    int ok = p_geti(p, "MKW.Test.I", &i) && i == -12345 && p_getu(p, "MKW.Test.U", &u) && u == 4000000000u &&
+             p_getf(p, "MKW.Test.F", &f) && f == 1.25f && p_getp(p, "MKW.Test.P", &v) && v == (void *)p;
+    if (N.destroy_params) N.destroy_params(p);
+    if (!ok) rt_log("temporal: NGX parameter layout check failed (i=%d u=%u f=%g p=%p): DLSS unavailable", i, u, f, v);
+    return ok;
+}
+
+static void ngx_init(void) {
+    if (!core_load()) return;
+#ifdef _WIN32
+    wchar_t wdir[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, wdir, MAX_PATH);
+    while (len && wdir[len - 1] != L'\\') len--;
+    wdir[len] = 0;
+    const VkCtx *c = vk_ctx();
+    NgxResult r = N.init(NGX_APP_ID, wdir, c->instance, c->phys, c->device, vkGetInstanceProcAddr, vkGetDeviceProcAddr,
+                         NGX_VERSION_API, NULL);
+    if (!NGX_OK(r)) {
+        rt_log("temporal: NGX init failed (%08x): DLSS unavailable", (unsigned)r);
+        return;
+    }
+    if (!vtable_ok()) return;
+    NgxParam *caps = NULL;
+    int avail = 0, driver = 0, fga = 0;
+    unsigned mx = 0;
+    if (NGX_OK(N.caps(&caps)) && caps) {
+        p_geti(caps, "SuperSampling.Available", &avail);
+        p_geti(caps, "SuperSampling.NeedsUpdatedDriver", &driver);
+        p_geti(caps, "FrameGeneration.Available", &fga);
+        if (!p_getu(caps, "DLSSG.MultiFrameCountMax", &mx)) mx = 1;
+    }
+    N.capsp = caps;
+    N.up = 1;
+    N.dlss = avail != 0;
+    N.fg_max = fga ? (mx < 1 ? 1 : (int)mx) : 0;
+    rt_log("temporal: NGX up; DLSS Super Resolution %s%s; DLSS Frame Generation %s (up to %dx)",
+           avail ? "available" : "NOT available (is nvngx_dlss.dll next to mkw.exe?)",
+           driver ? " (the driver needs an update)" : "", fga ? "available" : "not available", N.fg_max + 1);
+#endif
+}
+
+// ---------------------------------------------------------------- the frame's state
+
+#define CAM_BYTES 0x980u   // the scene camera block's size (vertex c4)
+#define CAM_ROWS 32
+#define SHADER_SMAA_BLEND 0x138f5b8eb8a6b9e0ull
+#define SHADER_SMAA_EDGE 0xa1becfadc5da81adull
+#define SHADER_SMAA_WEIGHT 0x68b69c76ad2d7905ull
+
+typedef struct {
+    VkImage image;
+    VkFormat format;
+    VkImageAspectFlags aspect;
+    VkImageUsageFlags usage;
+    uint32_t w, h;
+    const VkTexImage *tex;   // valid only under the texture lock in the frame it was seen
+} Img;
+
+static PlatMutex tlock = PLAT_MUTEX_INIT;   // the camera capture: MKW_REPLAY_PAR records draws on several threads
+static struct {
+    int engine;                  // this frame's engine (read at the present before it)
+    int kart;                    // MKW_TEMPORAL_KART
+    int debug;                   // MKW_TEMPORAL_DEBUG: 1 motion vectors, 2 depth, 3 jitter off
+    float jsign[2];              // MKW_TEMPORAL_JSIGN: the jitter handed to the upscaler, x and y signs
+    float sharp;                 // MKW_TEMPORAL_SHARPNESS / 100
+    int preset;                  // MKW_DLSS_PRESET: 0 NVIDIA's default, else the letter's index + 1
+    unsigned cfg_seen;
+    // this frame
+    int cam_ok;
+    float cam[CAM_ROWS * 4];
+    uint64_t cam_addr;
+    Img depth;                   // the scene's depth (passes with the camera block)
+    Img pre;                     // the tonemapped scene before SMAA (the SMAA blend's tex slot 0)
+    VkImage smaa_out;            // the SMAA blend's target: what the game's upscale dispatch reads
+    int done;                    // the upscaler ran this frame
+    uint64_t frame;              // the game frame being recorded (presents so far)
+    // jitter: decided at the present before the frame
+    uint32_t jidx;
+    float jx, jy;                // this frame's offset in render pixels (x right, y down)
+    VkImage jdepth;              // last frame's scene depth: draws into it with the camera take the jitter
+    uint32_t jw, jh;
+    int draw_jit;                // the draw being recorded takes the jitter (vk_tmp_viewport)
+    uint64_t jit_draws;
+    // camera history
+    double last_vp[16];
+    int last_vp_ok;
+    int reset;                   // the next evaluation starts a new history
+    uint64_t last_eval_ns;
+    // stats, logged every 600 frames
+    uint64_t evals, cams_miss, prev_match, prev_differ, fails;
+    uint64_t log_frame;
+} T = {.jsign = {1, 1}, .cfg_seen = ~0u, .reset = 1};
+
+static uint64_t spv_hash(const GfxShader *s) {
+    static struct { const GfxShader *s; uint64_t h; } tab[512];
+    static PlatMutex lock = PLAT_MUTEX_INIT;
+    if (!s) return 0;
+    const GfxShader *g = gfx_shader_variant_of(s);
+    if (g) s = g;
+    uint32_t slot = (uint32_t)(((uintptr_t)s >> 4) * 2654435761u) % 512;
+    plat_mutex_lock(&lock);
+    if (tab[slot].s == s) { uint64_t h = tab[slot].h; plat_mutex_unlock(&lock); return h; }
+    plat_mutex_unlock(&lock);
+    uint64_t words = 0, h = 0xcbf29ce484222325ull;
+    const uint8_t *b = (const uint8_t *)gfx_shader_spirv(s, &words);
+    for (uint64_t k = 0; b && k < words * 4; k++) h = (h ^ b[k]) * 0x100000001b3ull;
+    plat_mutex_lock(&lock);
+    tab[slot].s = s, tab[slot].h = h;
+    plat_mutex_unlock(&lock);
+    return h;
+}
+
+static void read_cfg(void) {
+    unsigned v = cfg_version();
+    if (v == T.cfg_seen) return;
+    T.cfg_seen = v;
+    T.engine = vk_tmp_engine();
+    if (T.engine == VK_TMP_DLSS && !N.dlss) T.engine = VK_TMP_OFF;
+    if (T.engine == VK_TMP_FSR3 && !vk_tmp_ffx_load()) T.engine = VK_TMP_OFF;
+    T.kart = cfg_bool("MKW_TEMPORAL_KART");
+    const char *d = cfg_get("MKW_TEMPORAL_DEBUG");
+    T.debug = !d ? 0 : !strcmp(d, "mv") ? 1 : !strcmp(d, "depth") ? 2 : !strcmp(d, "nojitter") ? 3 : 0;
+    const char *js = cfg_get("MKW_TEMPORAL_JSIGN");   // "xy", "-xy", "x-y", "-x-y"
+    T.jsign[0] = js && js[0] == '-' ? -1.f : 1.f;
+    T.jsign[1] = js && strstr(js, "-y") ? -1.f : 1.f;
+    T.sharp = (float)cfg_int("MKW_TEMPORAL_SHARPNESS") / 100.f;
+    const char *p = cfg_value("MKW_DLSS_PRESET");
+    T.preset = p[0] >= 'a' && p[0] <= 'z' && !p[1] ? p[0] - 'a' + 1 : p[0] >= 'A' && p[0] <= 'Z' && !p[1] ? p[0] - 'A' + 1 : 0;
+    rt_log("temporal: %s (MKW_TEMPORAL %s, quality %s, 3D at %d/1000 of the screen's lines)%s%s",
+           T.engine == VK_TMP_DLSS ? "DLSS" : T.engine == VK_TMP_FSR3 ? "FSR 3.1" : "off", cfg_value("MKW_TEMPORAL"),
+           cfg_value("MKW_TEMPORAL_QUALITY"), vk_tmp_scene_permille(), T.kart ? ", kart kept still" : "",
+           T.debug ? ", debug view" : "");
+}
+
+// ---------------------------------------------------------------- jitter
+
+static float halton(uint32_t i, uint32_t b) {
+    float f = 1, r = 0;
+    for (uint32_t k = i; k > 0; k /= b) f /= (float)b, r += f * (float)(k % b);
+    return r;
+}
+
+void vk_tmp_viewport(const VkExec *ex, VkViewport *v) {
+    (void)ex;
+    if (!T.draw_jit) return;
+    v->x += T.jx;
+    v->y += T.jy;   // the y-flipped viewport (record_fixed): its origin is the bottom row; moving it down moves the picture down
+}
+
+static void next_jitter(uint32_t rw, uint32_t ow) {
+    float ratio = rw ? (float)ow / (float)rw : 1.f;
+    uint32_t phases = (uint32_t)ceilf(8.f * ratio * ratio);
+    if (phases < 8) phases = 8;
+    if (phases > 64) phases = 64;
+    T.jidx = T.jidx % phases + 1;
+    T.jx = halton(T.jidx, 2) - 0.5f;
+    T.jy = halton(T.jidx, 3) - 0.5f;
+}
+
+// ---------------------------------------------------------------- per draw
+
+static int img_of(VkExec *ex, uint64_t h, Img *out) {
+    if (!h) return 0;
+    view_t v;
+    int hv = 0;
+    vk_texture_lock();
+    const VkTexImage *t = vk_texture_by_id_locked(NVN_HANDLE_TEX(h), &v, &hv);
+    if (t) *out = (Img){t->image, t->format, t->aspect, t->usage, t->width, t->height, t};
+    vk_texture_unlock();
+    (void)ex;
+    return t != NULL;
+}
+
+static int scene_pass(const VkExec *ex) {
+    return ex->depth.image && (ex->depth.format == VK_FORMAT_D32_SFLOAT_S8_UINT || ex->depth.format == VK_FORMAT_D32_SFLOAT) &&
+           ex->pass_w >= 320 && ex->pass_h >= 180;
+}
+
+static void capture_camera(VkExec *ex) {
+    const p_bind_buf *u = &ex->ubo[0][1];   // vertex c4
+    if (u->size != CAM_BYTES || !u->addr) return;
+    if (T.cam_ok && T.cam_addr == u->addr && (T.depth.image == ex->depth.image || ex->pass_w * ex->pass_h <= T.depth.w * T.depth.h))
+        return;   // once per frame: the first pass of the largest size
+    const uint8_t *b = vk_usnap_peek(u->addr, CAM_ROWS * 16, 256);
+    if (!b) b = (const uint8_t *)(uintptr_t)u->addr;   // guest memory: what the game wrote last
+    plat_mutex_lock(&tlock);
+    // the largest scene of the frame wins: reflections and the like draw smaller
+    if (!T.cam_ok || ex->pass_w * ex->pass_h > T.depth.w * T.depth.h) {
+        memcpy(T.cam, b, sizeof T.cam);
+        T.cam_ok = 1, T.cam_addr = u->addr;
+        T.depth = (Img){ex->depth.image, ex->depth.format, VK_IMAGE_ASPECT_DEPTH_BIT,
+                        ex->depth.img ? ex->depth.img->usage : 0, ex->depth.width, ex->depth.height, NULL};
+    }
+    plat_mutex_unlock(&tlock);
+}
+
+static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_draw);
+static void trace_hash(const char *what, uint64_t h, const VkExec *ex);
+
+int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
+    int jit = 0;
+    if (T.engine != VK_TMP_OFF && vs) {
+        const p_bind_buf *u = &ex->ubo[0][1];
+        int cam = u->size == CAM_BYTES && u->addr;
+        if (cam && scene_pass(ex)) capture_camera(ex);
+        // the scene's depth alternates between two images from frame to frame (traced 15/11/2026): a draw with the
+        // camera into a depth of last frame's scene size is the scene's
+        jit = cam && T.debug != 3 && T.jdepth && scene_pass(ex) && ex->pass_w == T.jw && ex->pass_h == T.jh;
+    }
+    {
+        static int on = -1, n;
+        if (on < 0) on = cfg_get("MKW_TEMPORAL_TRACE") ? atoi(cfg_get("MKW_TEMPORAL_TRACE")) : 0;
+        if (on && n < 300 && T.frame >= (uint64_t)on && T.frame < (uint64_t)on + 2 && scene_pass(ex) && vs) {
+            n++;
+            rt_log("temporal: draw f%llu pass %ux%u depth %p jdepth %p vs %016llx ubo sizes %llx %llx %llx %llx %llx jit %d",
+                   (unsigned long long)T.frame, ex->pass_w, ex->pass_h, (void *)ex->depth.image, (void *)T.jdepth,
+                   (unsigned long long)spv_hash(vs), (unsigned long long)ex->ubo[0][0].size,
+                   (unsigned long long)ex->ubo[0][1].size, (unsigned long long)ex->ubo[0][2].size,
+                   (unsigned long long)ex->ubo[0][3].size, (unsigned long long)ex->ubo[0][4].size, jit);
+        }
+    }
+    if (jit != T.draw_jit) T.draw_jit = jit, ex->dirty |= VK_EXEC_DIRTY_VIEWPORT;
+    if (jit) T.jit_draws++;
+    if (T.engine == VK_TMP_OFF || !fs || T.done) return 1;
+    uint64_t h = spv_hash(fs);
+    if (h == SHADER_SMAA_BLEND || h == SHADER_SMAA_EDGE || h == SHADER_SMAA_WEIGHT) trace_hash("fs-smaa", h, ex);
+    if (h != SHADER_SMAA_BLEND) return 1;
+    // The SMAA blend: its tex slot 0 is the tonemapped scene. With the screen at the scene's size (native) it writes
+    // the screen target, and the upscaler takes its place; else the upscale dispatch comes after it.
+    Img pre;
+    if (!img_of(ex, ex->tex[1][0], &pre)) return 1;
+    T.pre = pre;
+    T.smaa_out = ex->color[0].image;   // the upscale dispatch reads it (vk_tmp_dispatch)
+    if (!ex->color[0].image || ex->color[0].width != pre.w || ex->color[0].height != pre.h) return 1;
+    if (!T.cam_ok) return 1;
+    // native: is this the screen target? The screen target is the one the HUD draws into, of the screen's size; the
+    // blend into a target of the scene's size followed by the upscale dispatch is told apart by MKW_TEMPORAL_QUALITY.
+    if (vk_tmp_scene_permille() < 1000) return 1;
+    Img out = {ex->color[0].image, ex->color[0].format, VK_IMAGE_ASPECT_COLOR_BIT,
+               ex->color[0].img ? ex->color[0].img->usage : 0, ex->color[0].width, ex->color[0].height, NULL};
+    return run_upscaler(ex, &pre, &out, 1) ? 0 : 1;
+}
+
+static void trace_hash(const char *what, uint64_t h, const VkExec *ex) {
+    static int on = -1, n;
+    if (on < 0) on = cfg_get("MKW_TEMPORAL_TRACE") ? atoi(cfg_get("MKW_TEMPORAL_TRACE")) : 0;
+    if (!on || n >= 1500 || T.frame < (uint64_t)on) return;
+    n++;
+    rt_log("temporal: trace frame %llu %s %016llx pass %ux%u", (unsigned long long)T.frame, what, (unsigned long long)h,
+           ex->pass_w, ex->pass_h);
+}
+
+int vk_tmp_dispatch(VkExec *ex, const GfxShader *cs) {
+    if (T.engine == VK_TMP_OFF || T.done || !T.smaa_out) return 0;
+    // the game's upscale: the first dispatch after the SMAA blend that reads the blend's output (tex slot 0) and writes
+    // a larger image (img slot 1). Its program changes with the ratio (5d920a71d444c084 at 1.25x, cc1d4db34f244182 at
+    // 1.5x, measured 15/11/2026), so it is known by what it reads and writes.
+    Img in, out;
+    if (!img_of(ex, ex->tex[NVN_STAGE_CS][0], &in) || in.image != T.smaa_out) return 0;
+    T.smaa_out = VK_NULL_HANDLE;
+    if (!img_of(ex, ex->img[NVN_STAGE_CS][1], &out) || out.w <= in.w || out.h <= in.h) return 0;
+    uint64_t hh = spv_hash(cs);
+    static uint64_t told[8];
+    for (int i = 0; i < 8; i++) {
+        if (told[i] == hh) break;
+        if (!told[i]) { told[i] = hh; rt_log("temporal: the game's upscale is cs %016llx (%ux%u -> %ux%u)", (unsigned long long)hh, in.w, in.h, out.w, out.h); break; }
+    }
+    if (!T.cam_ok) { T.cams_miss++; return 0; }
+    // the tonemapped scene before SMAA, when the blend ran this frame at the size of the dispatch's input
+    const Img *color = T.pre.image && T.pre.w == in.w && T.pre.h == in.h ? &T.pre : &in;
+    return run_upscaler(ex, color, &out, 0);
+}
+
+// ---------------------------------------------------------------- the passes' own resources
+
+typedef struct {
+    VkImage img;
+    VmaAllocation mem;
+    VkImageView view;
+    uint32_t w, h;
+    VkFormat fmt;
+} Own;
+
+static struct {
+    int ok;   // -1 not built, 0 failed, 1 ready
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout layout;
+    VkPipeline mv;
+    VkSampler samp;
+    PFN_vkCmdPushDescriptorSetKHR push;
+    Own mvimg, outimg, zimg;
+} R = {.ok = -1};
+
+static int own_image(Own *o, uint32_t w, uint32_t h, VkFormat f) {
+    if (o->img && o->w == w && o->h == h && o->fmt == f) return 1;
+    const VkCtx *c = vk_ctx();
+    if (o->img) {   // a size change: the old one waits for the GPU through the device idle (rare: DRS or a mode change)
+        vkDeviceWaitIdle(c->device);
+        vkDestroyImageView(c->device, o->view, NULL);
+        vmaDestroyImage(c->vma, o->img, o->mem);
+        *o = (Own){0};
+    }
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f,
+                            .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                            .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    if (vmaCreateImage(c->vma, &ci, &ai, &o->img, &o->mem, NULL) != VK_SUCCESS) return 0;
+    VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img,
+                                .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = f,
+                                .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    if (vkCreateImageView(c->device, &vi, NULL, &o->view) != VK_SUCCESS) {
+        vmaDestroyImage(c->vma, o->img, o->mem);
+        *o = (Own){0};
+        return 0;
+    }
+    o->w = w, o->h = h, o->fmt = f;
+    // to GENERAL at once, on a command buffer of its own: every image of the replay stays in GENERAL
+    VkCommandPool pool;
+    VkCommandPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = c->gfx_family};
+    if (vkCreateCommandPool(c->device, &pci, NULL, &pool) == VK_SUCCESS) {
+        VkCommandBuffer cb;
+        VkCommandBufferAllocateInfo cai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool,
+                                           .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+        vkAllocateCommandBuffers(c->device, &cai, &cb);
+        VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+        vkBeginCommandBuffer(cb, &bi);
+        VkImageMemoryBarrier2 b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                   .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                   .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                   .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                   .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .image = o->img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
+                               .pImageMemoryBarriers = &b};
+        vkCmdPipelineBarrier2(cb, &di);
+        vkEndCommandBuffer(cb);
+        VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
+        vk_queue_lock();
+        vkQueueSubmit(c->gfx_queue, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(c->gfx_queue);
+        vk_queue_unlock();
+        vkDestroyCommandPool(c->device, pool, NULL);
+    }
+    return 1;
+}
+
+static int res_init(void) {
+    if (R.ok >= 0) return R.ok;
+    R.ok = 0;
+    const VkCtx *c = vk_ctx();
+    R.push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
+    VkDescriptorSetLayoutBinding b[3] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+                                           .bindingCount = 3, .pBindings = b};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 112};
+    VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST,
+                              .minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+                              .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                              .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                              .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+    VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof tmp_mv_spv,
+                                   .pCode = tmp_mv_spv};
+    VkShaderModule m = VK_NULL_HANDLE;
+    if (!R.push || vkCreateDescriptorSetLayout(c->device, &dci, NULL, &R.dsl) != VK_SUCCESS) goto fail;
+    VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = &R.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    if (vkCreatePipelineLayout(c->device, &li, NULL, &R.layout) != VK_SUCCESS ||
+        vkCreateSampler(c->device, &si, NULL, &R.samp) != VK_SUCCESS ||
+        vkCreateShaderModule(c->device, &mi, NULL, &m) != VK_SUCCESS)
+        goto fail;
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
+                                      .layout = R.layout};
+    VkResult r = vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, &R.mv);
+    vkDestroyShaderModule(c->device, m, NULL);
+    if (r != VK_SUCCESS) goto fail;
+    return R.ok = 1;
+fail:
+    rt_log("temporal: the motion vector pass could not be set up: the game's own upscaling");
+    return 0;
+}
+
+// ---------------------------------------------------------------- matrices
+
+static void rows4(const float *cam, int row, double m[16]) {   // 4 rows of the camera block, row-major
+    for (int r = 0; r < 4; r++)
+        for (int k = 0; k < 4; k++) m[r * 4 + k] = cam[(row + r) * 4 + k];
+}
+
+static int inv4(const double m[16], double o[16]) {
+    double inv[16];
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+    double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (fabs(det) < 1e-30) return 0;
+    for (int i = 0; i < 16; i++) o[i] = inv[i] / det;
+    return 1;
+}
+
+static void mul4(const double a[16], const double b[16], double o[16]) {   // row-major a * b
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) {
+            double s = 0;
+            for (int k = 0; k < 4; k++) s += a[r * 4 + k] * b[k * 4 + c];
+            o[r * 4 + c] = s;
+        }
+}
+
+// ---------------------------------------------------------------- the evaluation
+
+typedef struct {
+    NgxHandle *feat;
+    uint32_t w, h, ow, oh;   // render size it was created for (the largest it takes), output size
+    int q, preset, hdr;
+} Feat;
+static Feat F;
+
+static int perf_quality(uint32_t w, uint32_t ow) {   // NVSDK_NGX_PerfQuality_Value from the area's ratio
+    float r = (float)w / (float)ow;
+    return r >= 0.95f ? 5 /* DLAA */ : r >= 0.64f ? 2 /* quality */ : r >= 0.55f ? 1 /* balanced */
+         : r >= 0.45f ? 0 /* performance */ : 3 /* ultra performance */;
+}
+
+static int dlss_feature(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow, uint32_t oh, int hdr) {
+    // created for the largest render size the setting gives (the game's dynamic resolution only goes below it), so a
+    // smaller frame runs on the same feature with its render subrectangle
+    int pm = vk_tmp_scene_permille();
+    uint32_t mw = pm ? (ow * (uint32_t)pm + 999) / 1000 : w, mh = pm ? (oh * (uint32_t)pm + 999) / 1000 : h;
+    if (mw < w) mw = w;
+    if (mh < h) mh = h;
+    if (mw > ow) mw = ow;
+    if (mh > oh) mh = oh;
+    if (F.feat && F.ow == ow && F.oh == oh && w <= F.w && h <= F.h && F.preset == T.preset && F.hdr == hdr) return 1;
+    w = mw, h = mh;
+    int q = perf_quality(w, ow);
+    if (F.feat) {
+        vkDeviceWaitIdle(vk_ctx()->device);
+        N.release(F.feat);
+        F.feat = NULL;
+    }
+    NgxParam *p = NULL;
+    if (!NGX_OK(N.alloc_params(&p)) || !p) return 0;
+    p_setu(p, "CreationNodeMask", 1);
+    p_setu(p, "VisibilityNodeMask", 1);
+    p_setu(p, "Width", w);
+    p_setu(p, "Height", h);
+    p_setu(p, "OutWidth", ow);
+    p_setu(p, "OutHeight", oh);
+    p_seti(p, "PerfQualityValue", q);
+    // MVLowRes (motion vectors at the render size) | IsHDR when the scene's colours go above 1
+    p_seti(p, "DLSS.Feature.Create.Flags", (1 << 1) | (hdr ? 1 << 0 : 0));
+    p_seti(p, "DLSS.Enable.Output.Subrects", 0);
+    static const char *const presets[] = {"DLSS.Hint.Render.Preset.DLAA", "DLSS.Hint.Render.Preset.UltraQuality",
+                                          "DLSS.Hint.Render.Preset.Quality", "DLSS.Hint.Render.Preset.Balanced",
+                                          "DLSS.Hint.Render.Preset.Performance",
+                                          "DLSS.Hint.Render.Preset.UltraPerformance"};
+    for (size_t i = 0; i < sizeof presets / sizeof *presets; i++) p_setu(p, presets[i], (unsigned)T.preset);
+    NgxResult r = N.create(cb, NGX_FEATURE_SUPERSAMPLING, p, &F.feat);
+    if (N.destroy_params) N.destroy_params(p);
+    if (!NGX_OK(r) || !F.feat) {
+        F.feat = NULL;
+        rt_log("temporal: DLSS feature %ux%u -> %ux%u (quality %d) could not be created (%08x)", w, h, ow, oh, q, (unsigned)r);
+        return 0;
+    }
+    F.w = w, F.h = h, F.ow = ow, F.oh = oh, F.q = q, F.preset = T.preset, F.hdr = hdr;
+    T.reset = 1;
+    rt_log("temporal: DLSS feature %ux%u -> %ux%u, quality %d, preset %d%s", w, h, ow, oh, q, T.preset, hdr ? ", HDR" : "");
+    return 1;
+}
+
+static NgxResourceVK res_image(VkImageView v, VkImage img, VkFormat f, uint32_t w, uint32_t h, VkImageAspectFlags a, int rw) {
+    NgxResourceVK r;
+    memset(&r, 0, sizeof r);
+    r.r.img = (NgxImageView){v, img, {a, 0, 1, 0, 1}, f, w, h};
+    r.type = 0;
+    r.rw = rw != 0;
+    return r;
+}
+
+static VkImageView game_view(const Img *i, VkImageAspectFlags aspect) {
+    // vk_exec_target_view keys the view by the image and frees it with the image (vk_exec_image_gone)
+    VkTexImage tmp;
+    memset(&tmp, 0, sizeof tmp);
+    tmp.image = i->image, tmp.format = i->format, tmp.aspect = i->aspect, tmp.usage = i->usage;
+    tmp.width = i->w, tmp.height = i->h, tmp.depth = 1, tmp.levels = 1, tmp.layers = 1;
+    return vk_exec_target_view(&tmp, i->format, VK_IMAGE_VIEW_TYPE_2D, aspect, 0, 0, 1, 0);
+}
+
+static void barrier_all(VkCommandBuffer cb) {
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                           .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+}
+
+static int hdr_scene(void) {
+    // past the tonemap the scene goes above 1 only when the game draws HDR (an HDR10 window)
+    const char *e = cfg_get("MKW_TEMPORAL_HDR");
+    if (e) return strcmp(e, "0") != 0;
+    uint16_t peak = 0, white = 0;
+    return gfx_hdr_output(&peak, &white);
+}
+
+// The upscaler in the place of the game's upscale (dispatch) or of its SMAA blend into the screen target (draw).
+static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_draw) {
+    if (!T.depth.image || T.depth.w != color->w || T.depth.h != color->h) {
+        static int told;
+        if (told++ < 4)
+            rt_log("temporal: frame %llu: no scene depth of the colour's size %ux%u (depth %ux%u): the game's own upscaling",
+                   (unsigned long long)T.frame, color->w, color->h, T.depth.w, T.depth.h);
+        return 0;
+    }
+    if (!res_init()) return 0;
+    uint32_t w = color->w, h = color->h, ow = out->w, oh = out->h;
+    // the camera: this frame's and the game's own copy of the previous frame's view-projection
+    double vp[16], vpp[16], ivp[16], m[16];
+    rows4(T.cam, 3, vp);
+    rows4(T.cam, 24, vpp);
+    if (!inv4(vp, ivp)) return 0;
+    if (T.last_vp_ok) {
+        double d = 0;
+        for (int i = 0; i < 16; i++) d += fabs(T.last_vp[i] - vpp[i]);
+        if (d < 1e-3) T.prev_match++;
+        else T.prev_differ++;
+    }
+    memcpy(T.last_vp, vp, sizeof vp);
+    T.last_vp_ok = 1;
+    mul4(vpp, ivp, m);
+    // camera cut: the previous matrices far from this frame's
+    {
+        double d = 0;
+        for (int i = 12; i < 16; i++) d += fabs(vp[i] - vpp[i]);
+        if (d > 50.0) T.reset = 1;
+    }
+    float znear = T.cam[14 * 4 + 0], zfar = T.cam[14 * 4 + 1];
+    float p11 = T.cam[8 * 4 + 1];   // projection [1][1]
+    float fov = p11 > 0 ? 2.f * atanf(1.f / p11) : 1.f;
+    VkCommandBuffer cb = ex->cb;
+    vk_exec_pass_end(ex);
+    vk_exec_barrier(ex);
+    rec_drain();   // from here the calls are made at once, after everything queued before
+    if (!own_image(&R.mvimg, w, h, VK_FORMAT_R16G16_SFLOAT) || !own_image(&R.zimg, w, h, VK_FORMAT_R32_SFLOAT)) return 0;
+    VkImageView zview = game_view(&T.depth, VK_IMAGE_ASPECT_DEPTH_BIT), cview = game_view(color, VK_IMAGE_ASPECT_COLOR_BIT);
+    // motion vectors
+    {
+        struct { float m[16]; float size[2], pad[2]; float kart[4]; } pc;
+        for (int r = 0; r < 4; r++)
+            for (int c = 0; c < 4; c++) pc.m[c * 4 + r] = (float)m[r * 4 + c];   // column-major for GLSL
+        pc.size[0] = (float)w, pc.size[1] = (float)h, pc.pad[0] = pc.pad[1] = 0;
+        // the kart: a circle of 0.22 of the width around (0.5, 0.78), nearer than 0.9 of the depth range's start
+        float kz = 0.f;
+        if (T.kart && zfar > znear) {
+            // depth of a point 12 units in front of the camera: d = (ndc + 1) / 2 with ndc = (f + n - 2fn / z) / (f - n)
+            double z = 12.0, ndc = (zfar + znear - 2.0 * zfar * znear / z) / (zfar - znear);
+            kz = (float)((ndc + 1.0) * 0.5);
+        }
+        pc.kart[0] = T.kart ? 0.22f : 0.f, pc.kart[1] = 0.5f, pc.kart[2] = 0.78f, pc.kart[3] = kz;
+        VkDescriptorImageInfo di0 = {R.samp, zview, VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo di1 = {VK_NULL_HANDLE, R.mvimg.view, VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo di2 = {VK_NULL_HANDLE, R.zimg.view, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet wr[3] = {
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
+             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di0},
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1,
+             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &di1},
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 2, .descriptorCount = 1,
+             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &di2}};
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, R.mv);
+        R.push(cb, VK_PIPELINE_BIND_POINT_COMPUTE, R.layout, 0, 3, wr);
+        vkCmdPushConstants(cb, R.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+        vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
+        barrier_all(cb);
+    }
+    int hdr = hdr_scene();
+    uint64_t now = plat_now_ns();
+    float frame_ms = T.last_eval_ns && now > T.last_eval_ns ? (float)((now - T.last_eval_ns) / 1e6) : 16.7f;
+    if (frame_ms > 100.f) T.reset = 1, frame_ms = 16.7f;
+    T.last_eval_ns = now;
+    int ok = 0;
+    // the upscaler writes an image of its own, blitted into the game's target (any format, any usage)
+    VkFormat of = VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (!own_image(&R.outimg, ow, oh, of)) return 0;
+    float jx = T.debug == 3 ? 0.f : T.jx * T.jsign[0], jy = T.debug == 3 ? 0.f : T.jy * T.jsign[1];
+    if (T.debug == 1 || T.debug == 2) {
+        // the motion vectors (or the depth) scaled into the output, for a look: blit of the vector image
+        VkImageBlit bl = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}},
+                          {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)ow, (int32_t)oh, 1}}};
+        VkClearColorValue cc = {{0.5f, 0.5f, 0.5f, 1}};
+        VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cb, R.outimg.img, VK_IMAGE_LAYOUT_GENERAL, &cc, 1, &rr);
+        barrier_all(cb);
+        if (T.debug == 1)
+            vkCmdBlitImage(cb, R.mvimg.img, VK_IMAGE_LAYOUT_GENERAL, R.outimg.img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+                           VK_FILTER_NEAREST);
+        ok = 1;
+    } else if (T.engine == VK_TMP_DLSS) {
+        if (dlss_feature(cb, w, h, ow, oh, hdr)) {
+            NgxParam *p = NULL;
+            if (NGX_OK(N.alloc_params(&p)) && p) {
+                NgxResourceVK rc = res_image(cview, color->image, color->format, w, h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
+                NgxResourceVK ro = res_image(R.outimg.view, R.outimg.img, of, ow, oh, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+                NgxResourceVK rz = res_image(zview, T.depth.image, T.depth.format, w, h, VK_IMAGE_ASPECT_DEPTH_BIT, 0);
+                NgxResourceVK rm = res_image(R.mvimg.view, R.mvimg.img, VK_FORMAT_R16G16_SFLOAT, w, h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
+                p_setp(p, "Color", &rc);
+                p_setp(p, "Output", &ro);
+                p_setp(p, "Depth", &rz);
+                p_setp(p, "MotionVectors", &rm);
+                p_setf(p, "Jitter.Offset.X", jx);
+                p_setf(p, "Jitter.Offset.Y", jy);
+                p_setf(p, "MV.Scale.X", 1.0f);
+                p_setf(p, "MV.Scale.Y", 1.0f);
+                p_seti(p, "Reset", T.reset);
+                p_setu(p, "DLSS.Render.Subrect.Dimensions.Width", w);
+                p_setu(p, "DLSS.Render.Subrect.Dimensions.Height", h);
+                p_setf(p, "DLSS.Pre.Exposure", 1.0f);
+                p_setf(p, "DLSS.Exposure.Scale", 1.0f);
+                p_setf(p, "FrameTimeDeltaInMsec", frame_ms);
+                NgxResult r = N.evaluate(cb, F.feat, p, NULL);
+                if (N.destroy_params) N.destroy_params(p);
+                ok = NGX_OK(r);
+                if (!ok && T.fails++ < 4) rt_log("temporal: DLSS evaluation failed (%08x)", (unsigned)r);
+            }
+        }
+    } else if (T.engine == VK_TMP_FSR3) {
+        VkTmpRes rc = {color->image, color->format, w, h}, rz = {R.zimg.img, VK_FORMAT_R32_SFLOAT, w, h},
+                 rm = {R.mvimg.img, VK_FORMAT_R16G16_SFLOAT, w, h}, ro = {R.outimg.img, of, ow, oh};
+        ok = vk_tmp_ffx_upscale(cb, &rc, &rz, &rm, &ro, jx, jy, T.reset, frame_ms, znear, zfar, fov, hdr, T.sharp);
+        if (!ok && T.fails++ < 4) rt_log("temporal: FSR 3.1 upscale failed");
+    }
+    if (ok) {
+        barrier_all(cb);
+        VkImageBlit bl = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)ow, (int32_t)oh, 1}},
+                          {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)ow, (int32_t)oh, 1}}};
+        vkCmdBlitImage(cb, R.outimg.img, VK_IMAGE_LAYOUT_GENERAL, out->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+                       VK_FILTER_NEAREST);
+        barrier_all(cb);
+        T.reset = 0;
+        T.done = 1;
+        T.evals++;
+        T.jw = w, T.jh = h, T.jdepth = T.depth.image;
+        // the frame generation's inputs (vk_tmp_fg_inputs)
+    }
+    rec_drain();
+    vk_exec_draw_forget();
+    ex->dirty = VK_EXEC_DIRTY_ALL;
+    ex->recorded += 8;
+    (void)via_draw;
+    return ok;
+}
+
+int vk_tmp_fg_inputs(VkTmpFgInputs *out) {
+    (void)out;
+    return 0;
+}
+
+// ---------------------------------------------------------------- frame boundaries
+
+void vk_tmp_present(uint64_t frame) {
+    read_cfg();
+    if (T.engine != VK_TMP_OFF || T.done) {
+        if (!T.done) T.reset = 1;   // a frame without the upscaler (a menu): the next one starts a new history
+        next_jitter(T.jw, F.ow ? F.ow : T.jw);
+    }
+    if (frame >= T.log_frame + 600 && (T.evals || T.engine != VK_TMP_OFF)) {
+        rt_log("temporal: %llu evaluations, jittered draws %llu, frames without a camera at the upscale %llu, the game's "
+               "previous camera equal to ours %llu / differing %llu, failures %llu",
+               (unsigned long long)T.evals, (unsigned long long)T.jit_draws, (unsigned long long)T.cams_miss,
+               (unsigned long long)T.prev_match, (unsigned long long)T.prev_differ, (unsigned long long)T.fails);
+        T.log_frame = frame;
+    }
+    plat_mutex_lock(&tlock);
+    T.cam_ok = 0, T.cam_addr = 0;
+    T.depth = (Img){0};
+    plat_mutex_unlock(&tlock);
+    T.pre = (Img){0};
+    T.smaa_out = VK_NULL_HANDLE;
+    if (!T.done) T.jdepth = VK_NULL_HANDLE;   // no upscale this frame: nothing to jitter for
+    T.done = 0;
+    T.frame = frame + 1;
+}
+
+void vk_tmp_device_init(void) {
+    vk_usnap_host_wanted = 1;   // the camera block is read from the submission's own copy (vk_usnap_peek)
+    ngx_init();
+    read_cfg();
+}
+
+void vk_tmp_shutdown(void) {
+    const VkCtx *c = vk_ctx();
+    if (!c) return;
+    vkDeviceWaitIdle(c->device);
+    if (F.feat && N.release) N.release(F.feat), F.feat = NULL;
+    vk_tmp_ffx_shutdown();
+    Own *o[3] = {&R.mvimg, &R.outimg, &R.zimg};
+    for (int i = 0; i < 3; i++)
+        if (o[i]->img) vkDestroyImageView(c->device, o[i]->view, NULL), vmaDestroyImage(c->vma, o[i]->img, o[i]->mem), *o[i] = (Own){0};
+    if (N.up && N.shutdown1) N.shutdown1(c->device), N.up = 0;
+}

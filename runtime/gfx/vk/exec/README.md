@@ -22,3 +22,4 @@ and dispatches, descriptors, and their parallel recording.
 | `vk_exec_par.c` | `MKW_REPLAY_PAR`: a submit recorded in chunks on several threads after a light walk that tracks the state (`MKW_REPLAY_WALK` measures it) |
 | `vk_mesh_cs.c` | Task/mesh as compute without mesh shaders: VRAM buffers per submit, compaction pipeline and whether a draw takes that path (`MKW_MESH_COMPUTE`) |
 | `vk_ind_read.c` | Diagnostics `MKW_IND_READ` (indirect arguments the GPU used, copied at the end of each pass) and `MKW_IND_BARRIER` (their barriers without copies) |
+| `vk_temporal.h`, `vk_temporal.c`, `vk_tmp_ffx.cpp` | `MKW_TEMPORAL=dlss\|fsr3`: NVIDIA DLSS (NGX from the driver) or AMD FSR 3.1 (FidelityFX API DLLs, `vk_tmp_ffx.cpp`) in the place of the game's upscale from its 3D resolution to its screen's: the scene's jitter, camera motion vectors from the game's camera block (`shaders/tmp_mv.comp`), the upscale |

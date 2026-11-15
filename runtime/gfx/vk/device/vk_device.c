@@ -11,6 +11,7 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "vk_temporal.h"
 #include "vk.h"
 #include "vk_defaults.h"
 #include "platform/platform.h"
@@ -87,7 +88,7 @@ static int layer_present(const char *name) {
 }
 
 static int create_instance(void) {
-    const char *ext[9];
+    const char *ext[24];
     uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 7);
     uint32_t ni = 0;   // HDR10 swapchains (gfx_hdr.c) need the colour spaces of VK_EXT_swapchain_colorspace
     vkEnumerateInstanceExtensionProperties(NULL, &ni, NULL);
@@ -103,6 +104,7 @@ static int create_instance(void) {
         validate = 0;
     }
     if (validate) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    vk_tmp_instance_exts(ext, &n_ext, 24);   // NGX's (vk_temporal.c)
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "MKW Recomp",
                              .pEngineName = "MKW Recomp", .apiVersion = VK_API_VERSION_1_3};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
@@ -345,6 +347,7 @@ static int create_device(void) {
         gpl_link = tail;
         CHAIN(gpl, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT);
     }
+    vk_tmp_device_exts(ep, ne, ext, &n_ext, 48);   // NGX's (vk_temporal.c)
     free(ep);
 
     // The driver fills the chain with what it supports; the same chain then enables all of it (robustBufferAccess
@@ -514,7 +517,7 @@ static long g_errors_total;     // outlives the device so the probe can print it
 static void destroy_all(void) {
     gfx_window_release_vk();
     if (g_vk.device) vkDeviceWaitIdle(g_vk.device);
-    if (g_vk.device) vk_astc_release(), vk_crumbs_release();
+    if (g_vk.device) vk_astc_release(), vk_crumbs_release(), vk_tmp_shutdown();
     if (g_vk.timeline) vkDestroySemaphore(g_vk.device, g_vk.timeline, NULL);
     vk_headroom_stop();
     if (g_vk.vma) vmaDestroyAllocator(g_vk.vma);
@@ -536,7 +539,7 @@ int vk_init(void) {
     if (!g_ready) {
         memset(&g_vk, 0, sizeof g_vk);
         if (create_instance() && pick_device() && create_device())
-            g_ready = 1, vk_crumbs_init(), vk_headroom_start(), vk_tex_pool_start();
+            g_ready = 1, vk_crumbs_init(), vk_headroom_start(), vk_tex_pool_start(), vk_tmp_device_init();
         else destroy_all();
     }
     int ok = g_ready;

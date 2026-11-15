@@ -1,0 +1,41 @@
+#version 450
+// Camera motion vectors for the temporal upscalers (gfx/vk/exec/vk_temporal.c): every pixel of the scene's depth is
+// taken back to the previous frame through one matrix, prev = last view-projection * inverse(this view-projection),
+// which the CPU builds in double precision from the game's own camera block (it holds both frames' matrices). The
+// result is the pixel's motion from this frame to the last one, in render pixels, as DLSS and FSR 3.1 read it.
+//
+// The scene is drawn with the port's y flip (vk_exec_cb.c record_fixed: negative viewport height), so image row 0 is
+// NDC y = +1, and with NVN's minus-w depth mode (VK_EXT_depth_clip_control negativeOneToOne): NDC z = 2 * depth - 1.
+// Sky pixels (depth 1) reproject as points at infinity: their w goes to zero, so they get the rotation alone.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D depth_tex;
+layout(binding = 1, rg16f) uniform writeonly image2D mv_out;
+layout(binding = 2, r32f) uniform writeonly image2D depth_out;   // the depth as a plain R32F image (FSR 3.1, frame generation)
+layout(push_constant) uniform P {
+    mat4 reproj;     // column-major as GLSL reads it: clip_prev = reproj * clip_this
+    vec2 size;       // render size in pixels
+    vec2 pad;
+    vec4 kart;       // x: radius (0: off), yz: centre in UV, w: depth below which a pixel counts as the player's kart
+} p;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= int(p.size.x) || px.y >= int(p.size.y)) return;
+    vec2 uv = (vec2(px) + 0.5) / p.size;
+    float d = texelFetch(depth_tex, px, 0).r;
+    vec2 mv = vec2(0.0);
+    // The player's kart moves with the camera: its pixels near the bottom middle and close to the camera keep still
+    // (camera-only reprojection would move them like the ground under them and DLSS would smear them).
+    bool kart = p.kart.x > 0.0 && d < p.kart.w && distance(uv, p.kart.yz) < p.kart.x;
+    if (!kart) {
+        vec4 clip = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d * 2.0 - 1.0, 1.0);
+        vec4 prev = p.reproj * clip;
+        if (abs(prev.w) > 1e-7) {
+            vec2 ndc = prev.xy / prev.w;
+            vec2 puv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+            mv = (puv - uv) * p.size;
+        }
+    }
+    imageStore(mv_out, px, vec4(mv, 0.0, 0.0));
+    imageStore(depth_out, px, vec4(d, 0.0, 0.0, 0.0));
+}
