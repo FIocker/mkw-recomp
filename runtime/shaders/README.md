@@ -7,7 +7,8 @@ texel instead of 4), a BC1 encoder (`bc1_encode.comp`: half a byte per texel, fo
 (`fsr_easu.comp` scales, `fsr_rcas.comp` sharpens; AMD's headers in `ffx/`, MIT) and frame generation
 (`gfx/vk/device/vk_framegen.c`: `fg_luma.comp` the luma pyramid, `fg_flow.comp` the block matching of each level,
 `fg_median.comp` the vectors' median, `fg_synth.comp` a made frame, `fg_fsr_mv.comp` its opt-in full-resolution
-object-aware FSR vectors, and `fg_hud.comp` the current HUD over DLSS-G/FSR made frames) and the F1 menu on an HDR10 display
+object-aware FSR vectors, `of_luma.comp` the optional hardware optical-flow inputs, `of_mv.comp` its packed vectors
+decoded into FSR motion, and `fg_hud.comp` the current HUD over DLSS-G/FSR made frames) and the F1 menu on an HDR10 display
 (`hdr_fullscreen.vert` + `hdr_ui.frag`: the menu's sRGB image to PQ at paper white, `gfx/vk/device/vk_hdr_ui.c`; from
 totk-pc-recomp, MIT), and the temporal upscalers' camera motion vectors (`tmp_mv.comp`) and CAS sharpening (`tmp_cas.comp`, both `gfx/vk/exec/vk_temporal.c`). Compiled into `gfx/vk/*_spv.h`; a
 new or changed one is regenerated with `uv run tools/shaders/embed_spv.py runtime/shaders/<name>.comp`.

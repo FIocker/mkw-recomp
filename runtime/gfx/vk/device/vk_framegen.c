@@ -29,6 +29,8 @@
 #include "cfg.h"
 #include "fg_flow_spv.h"
 #include "fg_fsr_mv_spv.h"
+#include "of_mv_spv.h"
+#include "vk_oflow.h"
 #include "fg_luma_spv.h"
 #include "fg_median_spv.h"
 #include "fg_hud_spv.h"
@@ -52,6 +54,12 @@ static struct {
     VkDescriptorSetLayout dsl, fsr_dsl;
     VkPipelineLayout layout, fsr_layout;
     VkPipeline luma, coarse, fine, full, median, synth, fsr_mvp;
+    VkDescriptorSetLayout of_dsl;
+    VkPipelineLayout of_layout;
+    VkPipeline of_mvp;
+    VkOfResult of_result;
+    uint64_t of_last_frame;
+    int of_active;
     VkSampler sampler;
     VkCommandPool pool;
     VkCommandBuffer cb[SLOTS];
@@ -392,6 +400,39 @@ static void fsr_motion_pass(VkCommandBuffer cb, const VkTmpFgInputs *in, const I
     mem_barrier(cb);
 }
 
+static int of_motion_pass(VkCommandBuffer cb, VkBuffer vectors, uint32_t gw, uint32_t gh, uint32_t grid,
+                          const Img *out, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh) {
+    VkCtx *c = vk_ctx();
+    if (!F.of_mvp) {
+        VkDescriptorSetLayoutBinding b[2] = {
+            {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+            {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+        VkDescriptorSetLayoutCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 2, .pBindings = b};
+        VkPushConstantRange pc = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+        if (vkCreateDescriptorSetLayout(c->device, &di, NULL, &F.of_dsl) != VK_SUCCESS) return 0;
+        VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1, .pSetLayouts = &F.of_dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pc};
+        if (vkCreatePipelineLayout(c->device, &li, NULL, &F.of_layout) != VK_SUCCESS) return 0;
+        F.of_mvp = make_pipeline(c, F.of_layout, of_mv_spv, sizeof of_mv_spv, NULL, 0);
+        if (!F.of_mvp) return 0;
+    }
+    VkDescriptorBufferInfo bi = {vectors, 0, (VkDeviceSize)gw * gh * 4};
+    VkDescriptorImageInfo ii = {VK_NULL_HANDLE, out->view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet wr[2] = {
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii}};
+    struct { float size[4]; int grid[4]; } pc = {{(float)rw,(float)rh,(float)ow,(float)oh},{(int)gw,(int)gh,(int)grid,0}};
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.of_mvp);
+    rec_push(F.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.of_layout, 0, 2, wr);
+    vkCmdPushConstants(cb, F.of_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    vkCmdDispatch(cb, (rw + 7) / 8, (rh + 7) / 8, 1);
+    mem_barrier(cb);
+    return 1;
+}
+
 // fg_hud.comp's pipeline: five pictures sampled, the made frame written in place (each pixel reads only its own)
 static int hud_init(VkCtx *c) {
     if (F.hud_tried) return F.hud != VK_NULL_HANDLE;
@@ -455,6 +496,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     if (!F.tried) init(c);
     if (!F.ok) return 0;
     F.compare_native = VK_NULL_HANDLE;
+    F.of_active = 0;
     int cx = 0, cy = 0, cw = sw, ch = sh;
     if (crop && crop[2] > 0 && crop[3] > 0) cx = crop[0], cy = crop[1], cw = crop[2], ch = crop[3];
     if (cx < 0) cx = 0;
@@ -526,8 +568,11 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     static int zero_mv_mode = -1;
     if (zero_mv_mode < 0) zero_mv_mode = rt_knob("FG_ZERO_MV", "0");
     int zero_mv = eng == 2 && RT_KNOB_ON(zero_mv_mode);   // diagnostic: isolate game vectors from SDK optical flow
+    static int of_mode = -1;
+    if (of_mode < 0) of_mode = rt_knob("FG_NVOF", "0");
+    int of_wanted = eng == 2 && RT_KNOB_ON(of_mode) && c->has_oflow && F.split;
     VkTmpFgInputs fgin = {0};
-    int have_fgin = made && (flow_mv || zero_mv) && vk_tmp_fg_inputs(vk_fg_game_frame, &fgin);
+    int have_fgin = made && (flow_mv || zero_mv || of_wanted) && vk_tmp_fg_inputs(vk_fg_game_frame, &fgin);
     int mv_ready = 0;
     if (have_fgin && !fgin.reset && ensure_fsr_motion(c, (int)fgin.w, (int)fgin.h)) {
         img_barrier(cb, F.fsr_mv.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0,
@@ -536,8 +581,14 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
         mem_barrier(cb);
         mv_ready = 1;
     }
+    if (mv_ready && of_wanted && !fgin.reset && vk_of_init(c->of_queue, c->of_family)) {
+        int reset = !F.of_last_frame || F.of_last_frame + 1 != fgin.frame;
+        F.of_active = vk_of_prepare(xc, F.pic[prev].view, F.pic[cur].view, (uint32_t)cw, (uint32_t)ch,
+                                    reset, &F.of_result);
+        if (F.of_active) F.of_last_frame = fgin.frame;
+    }
     int flow_ready = 0;
-    if (made && (eng == 0 || (mv_ready && !zero_mv) || compare_native)) {
+    if (made && (eng == 0 || (mv_ready && !zero_mv && !F.of_active) || compare_native)) {
         // The SDK-only path avoids luma work, but FSR's optional object vectors and the readback reference need it
         // before their flow passes too. Both images may be stale after toggling the motion experiment in-run.
         for (int i = 0; i < 2; i++) {
@@ -632,7 +683,13 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             VkTmpFgInputs in;
             if (have_fgin || vk_tmp_fg_inputs(vk_fg_game_frame, &in)) {
                 if (have_fgin) in = fgin;
-                if (mv_ready && zero_mv) {
+                if (F.of_active && of_motion_pass(cb, F.of_result.vectors, F.of_result.wblocks, F.of_result.hblocks,
+                                                  F.of_result.grid, &F.fsr_mv, in.w, in.h, (uint32_t)cw, (uint32_t)ch)) {
+                    in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
+                    static int told;
+                    if (!told++) rt_log("vk: FSR motion from hardware optical flow, %ux%u cells of %u pixels",
+                                        F.of_result.wblocks, F.of_result.hblocks, F.of_result.grid);
+                } else if (mv_ready && zero_mv) {
                     VkClearColorValue zero = {.float32 = {0.f, 0.f, 0.f, 0.f}};
                     VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
                     vkCmdClearColorImage(cb, F.fsr_mv.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
@@ -773,6 +830,8 @@ static struct {
     VkDeviceSize size;
     int n[DUMP_N], hl[DUMP_N], ref[DUMP_N], depth[DUMP_N], w, h;
     float near_[DUMP_N], far_[DUMP_N];
+    int nv[DUMP_N];
+    uint32_t grid[DUMP_N][3];
     VkFormat fmt;   // exact presented encoding, including packed HDR10 readback
 } D;
 
@@ -825,6 +884,13 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
         }
         vkCmdCopyImageToBuffer(cb, in.depth, VK_IMAGE_LAYOUT_GENERAL, D.buf, 9, samples);
     }
+    VkDeviceSize nv_bytes = (VkDeviceSize)F.of_result.wblocks * F.of_result.hblocks * 4;
+    D.nv[k] = F.of_active && 64 + nv_bytes <= (VkDeviceSize)w * h * 4;
+    if (D.nv[k]) {
+        D.grid[k][0] = F.of_result.wblocks, D.grid[k][1] = F.of_result.hblocks, D.grid[k][2] = F.of_result.grid;
+        VkBufferCopy copy = {.srcOffset = 0, .dstOffset = base + (VkDeviceSize)w * h * 16 + 64, .size = nv_bytes};
+        vkCmdCopyBuffer(cb, F.of_result.vectors, D.buf, 1, &copy);
+    }
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
                            .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
@@ -857,6 +923,16 @@ static void dump_write(VkFence fence) {
         const float *z = (const float *)((const uint8_t *)D.map + px * 5 * (size_t)f + px * 4);
         rt_log("fg depth: frame %llu near %.8g far %.8g, samples %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g",
                (unsigned long long)(D.at + f), D.near_[f], D.far_[f], z[0],z[1],z[2],z[3],z[4],z[5],z[6],z[7],z[8]);
+    }
+    for (int f = 0; f < DUMP_N; f++) if (D.nv[f]) {
+        snprintf(path, sizeof path, "%s/o%llu.bin", dir, (unsigned long long)(D.at + f));
+        FILE *file = fopen(path, "wb");
+        if (file) {
+            fwrite(D.grid[f], sizeof(uint32_t), 3, file);
+            fwrite((const uint8_t *)D.map + px * 5 * (size_t)f + px * 4 + 64, 4,
+                   (size_t)D.grid[f][0] * D.grid[f][1], file);
+            fclose(file);
+        }
     }
     rt_log("vk: frame generation: game frames %llu-%llu written to %s (interval %.1f ms)", (unsigned long long)D.at,
            (unsigned long long)(D.at + DUMP_N - 1), dir, F.interval / 1e6);
@@ -953,11 +1029,22 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
         VkSubmitInfo2 xsi = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = F.fval ? 1u : 0u,
                              .pWaitSemaphoreInfos = &xw, .commandBufferInfoCount = 1, .pCommandBufferInfos = &xi,
                              .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &xs};
-        si.waitSemaphoreInfoCount = 1, si.pWaitSemaphoreInfos = &fw;
+        VkSemaphoreSubmitInfo waits[2] = {fw};
+        si.waitSemaphoreInfoCount = 1, si.pWaitSemaphoreInfos = waits;
         si.signalSemaphoreInfoCount = 1, si.pSignalSemaphoreInfos = &fs;
         vk_queue_lock();
         r = vkQueueSubmit2(c->gfx_queue, 1, &xsi, VK_NULL_HANDLE);
-        if (r == VK_SUCCESS) F.xval++, r = vkQueueSubmit2(c->fg_queue, 1, &si, F.fence[slot]);
+        if (r == VK_SUCCESS) {
+            F.xval++;
+            if (F.of_active) {
+                if (!vk_of_submit(F.xsem, F.xval, &F.of_result)) rt_fatal("vk: hardware optical-flow submit failed");
+                waits[1] = (VkSemaphoreSubmitInfo){.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+                    .semaphore = F.of_result.ready, .value = F.of_result.value,
+                    .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+                si.waitSemaphoreInfoCount = 2;
+            }
+            r = vkQueueSubmit2(c->fg_queue, 1, &si, F.fence[slot]);
+        }
         if (r == VK_SUCCESS) F.fval++;
         vk_queue_unlock();
     } else {
@@ -999,10 +1086,11 @@ VkImage vk_fg_flow(int level, int *gw, int *gh) {
 void vk_fg_release(void) {
     VkCtx *c = vk_ctx();
     if (!c || !F.tried) return;
+    vk_of_release();
     if (D.buf) vmaDestroyBuffer(c->vma, D.buf, D.alloc);
     memset(&D, 0, sizeof D);
     free_images(c);
-    VkPipeline ps[] = {F.luma, F.coarse, F.fine, F.full, F.median, F.synth, F.fsr_mvp};
+    VkPipeline ps[] = {F.luma, F.coarse, F.fine, F.full, F.median, F.synth, F.fsr_mvp, F.of_mvp};
     for (size_t i = 0; i < sizeof ps / sizeof *ps; i++)
         if (ps[i]) vkDestroyPipeline(c->device, ps[i], NULL);
     for (int i = 0; i < SLOTS; i++)
@@ -1016,8 +1104,10 @@ void vk_fg_release(void) {
     if (F.pool) vkDestroyCommandPool(c->device, F.pool, NULL);
     if (F.sampler) vkDestroySampler(c->device, F.sampler, NULL);
     if (F.fsr_layout) vkDestroyPipelineLayout(c->device, F.fsr_layout, NULL);
+    if (F.of_layout) vkDestroyPipelineLayout(c->device, F.of_layout, NULL);
     if (F.layout) vkDestroyPipelineLayout(c->device, F.layout, NULL);
     if (F.fsr_dsl) vkDestroyDescriptorSetLayout(c->device, F.fsr_dsl, NULL);
+    if (F.of_dsl) vkDestroyDescriptorSetLayout(c->device, F.of_dsl, NULL);
     if (F.dsl) vkDestroyDescriptorSetLayout(c->device, F.dsl, NULL);
     memset(&F, 0, sizeof F);
 }

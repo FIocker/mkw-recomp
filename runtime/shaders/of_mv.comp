@@ -1,0 +1,21 @@
+// Native VK_NV_optical_flow output: two signed 16-bit components with five fractional bits per grid cell.
+// INPUT=current, REFERENCE=previous, so these vectors already point current -> previous. Convert output pixels to
+// FSR's render pixels without reintroducing jitter from the resolved source images. First hardware baseline uses
+// the cell directly; interpolating vectors across an object boundary would mix the driver's and the road's motion.
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0, std430) readonly buffer Flow { uint cells[]; } flow;
+layout(binding = 1, rg16f) uniform writeonly image2D dst;
+layout(push_constant) uniform P {
+    vec4 size;     // render width/height, output width/height
+    ivec4 grid;    // grid width/height, cell side, reserved
+} p;
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(px, ivec2(p.size.xy)))) return;
+    vec2 output_px = (vec2(px) + 0.5) * p.size.zw / p.size.xy;
+    ivec2 block = clamp(ivec2(output_px) / p.grid.z, ivec2(0), p.grid.xy - 1);
+    uint packed = flow.cells[block.y * p.grid.x + block.x];
+    vec2 mv = vec2(float(int(packed << 16) >> 16), float(int(packed) >> 16)) / 32.0;
+    imageStore(dst, px, vec4(mv * p.size.xy / p.size.zw, 0.0, 0.0));
+}
