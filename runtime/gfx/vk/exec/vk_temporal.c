@@ -522,6 +522,7 @@ int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     // blend into a target of the scene's size followed by the upscale dispatch is told apart by MKW_TEMPORAL_QUALITY.
     // with the game's upscale dispatch in the recent frames, the blend writes the scene's own target and the dispatch
     // follows (vk_tmp_dispatch); else the blend writes the screen target and the upscaler goes here
+    if (!T.upscale_frame && romfs_resolution_scene_permille() < 1000) T.upscale_frame = T.frame;   // the likely path
     if (T.upscale_frame && T.frame - T.upscale_frame < 30) return 1;
     Img out = {ex->color[0].image, ex->color[0].format, VK_IMAGE_ASPECT_COLOR_BIT,
                ex->color[0].img ? ex->color[0].img->usage : 0, ex->color[0].width, ex->color[0].height, NULL};
@@ -538,7 +539,7 @@ static void trace_hash(const char *what, uint64_t h, const VkExec *ex) {
 }
 
 int vk_tmp_dispatch(VkExec *ex, const GfxShader *cs) {
-    if (T.engine == VK_TMP_OFF || T.done || !T.smaa_out) return 0;
+    if (T.engine == VK_TMP_OFF || !T.smaa_out) return 0;
     // the game's upscale: the first dispatch after the SMAA blend that reads the blend's output (tex slot 0) and writes
     // a larger image (img slot 1). Its program changes with the ratio (5d920a71d444c084 at 1.25x, cc1d4db34f244182 at
     // 1.5x, measured 15/11/2026), so it is known by what it reads and writes.
@@ -547,6 +548,7 @@ int vk_tmp_dispatch(VkExec *ex, const GfxShader *cs) {
     T.smaa_out = VK_NULL_HANDLE;
     if (!img_of(ex, ex->img[NVN_STAGE_CS][1], &out) || out.w <= in.w || out.h <= in.h) return 0;
     T.upscale_frame = T.frame;
+    if (T.done) return 0;   // (the blend took it this frame, before the dispatch was known: one frame)
     uint64_t hh = spv_hash(cs);
     static uint64_t told[8];
     for (int i = 0; i < 8; i++) {
