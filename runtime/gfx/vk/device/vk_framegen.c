@@ -572,10 +572,13 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     static int of_mode = -1;
     if (of_mode < 0) of_mode = rt_knob("FG_NVOF", "0");
     int of_wanted = eng == 2 && RT_KNOB_ON(of_mode) && c->has_oflow && F.split;
+    static int display_mv_mode = -1;
+    if (display_mv_mode < 0) display_mv_mode = rt_knob("FG_DISPLAY_MV", "0");
+    int display_mv = of_wanted && RT_KNOB_ON(display_mv_mode);
     VkTmpFgInputs fgin = {0};
     int have_fgin = made && (flow_mv || zero_mv || of_wanted) && vk_tmp_fg_inputs(vk_fg_game_frame, &fgin);
     int mv_ready = 0;
-    if (have_fgin && !fgin.reset && ensure_fsr_motion(c, (int)fgin.w, (int)fgin.h)) {
+    if (have_fgin && !fgin.reset && ensure_fsr_motion(c, display_mv ? cw : (int)fgin.w, display_mv ? ch : (int)fgin.h)) {
         img_barrier(cb, F.fsr_mv.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0,
                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                     VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
@@ -692,9 +695,11 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                 static int of_jitter = -1;
                 if (of_jitter < 0) of_jitter = rt_knob("FG_NVOF_JITTER", "1");
                 if (F.of_active && of_motion_pass(cb, F.of_result.vectors, F.of_result.wblocks, F.of_result.hblocks,
-                                                  F.of_result.grid, &F.fsr_mv, in.w, in.h, (uint32_t)cw, (uint32_t)ch,
-                                                  RT_KNOB_ON(of_jitter) ? in.jx : 0.f,
-                                                  RT_KNOB_ON(of_jitter) ? in.jy : 0.f)) {
+                                                  F.of_result.grid, &F.fsr_mv,
+                                                  display_mv ? (uint32_t)cw : in.w, display_mv ? (uint32_t)ch : in.h,
+                                                  (uint32_t)cw, (uint32_t)ch,
+                                                  !display_mv && RT_KNOB_ON(of_jitter) ? in.jx : 0.f,
+                                                  !display_mv && RT_KNOB_ON(of_jitter) ? in.jy : 0.f)) {
                     in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
                     static int told;
                     if (!told++) rt_log("vk: FSR motion from hardware optical flow, %ux%u cells of %u pixels",
@@ -713,7 +718,9 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                     fsr_motion_pass(cb, &in, &F.pic[cur], &F.pic[prev], &F.fl[5], &F.fsr_mv, pc, in.w, in.h);
                     in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
                 }
-                got = vk_tmp_ffx_fg(cb, &in, in_pic, in_hl, &outs[0]);
+                // The display-vector experiment describes a full-size motion resource to FSR. A failed OF setup
+                // must not expose the smaller camera-vector image under that description.
+                if (!display_mv || F.of_active) got = vk_tmp_ffx_fg(cb, &in, in_pic, in_hl, &outs[0]);
                 // Readback-only twin at the FSR frame's midpoint. FSR uses M[0]; this spare image never enters out[].
                 if (got == 1 && compare_native && !use_h && flow_ready) {
                     const float pc[4] = {0.5f, 1.0f / (16.0f * (float)gw), 1.0f / (16.0f * (float)gh), 0};

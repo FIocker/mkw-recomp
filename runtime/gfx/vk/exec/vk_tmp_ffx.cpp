@@ -251,6 +251,8 @@ FfxApiResource pic(const VkTmpPic *p, int write) {
 
 extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const VkTmpPic *bb, const VkTmpPic *hl,
                              const VkTmpPic *out) {
+    const char *full_mv = cfg_get("MKW_FG_DISPLAY_MV");
+    int display_mv = full_mv && strcmp(full_mv, "0") && cfg_get("MKW_FG_NVOF") && strcmp(cfg_get("MKW_FG_NVOF"), "0");
     if (!vk_tmp_ffx_load() || FG.failed) return 0;
     const VkCtx *c = vk_ctx();
     if (FG.ctx && (FG.w != bb->w || FG.h != bb->h || FG.fmt != bb->fmt || in->w > FG.rw || in->h > FG.rh)) fg_destroy();
@@ -259,6 +261,7 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
         d.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
         int hdr = bb->fmt != VK_FORMAT_R8G8B8A8_UNORM && bb->fmt != VK_FORMAT_R8G8B8A8_SRGB;
         d.flags = hdr ? FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE : 0;
+        if (display_mv) d.flags |= FFX_FRAMEGENERATION_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS;
         d.displaySize = {bb->w, bb->h};
         d.maxRenderSize = {bb->w, bb->h};
         d.backBufferFormat = surface(bb->fmt);
@@ -288,6 +291,13 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
         }
         FG.w = bb->w, FG.h = bb->h, FG.rw = bb->w, FG.rh = bb->h, FG.fmt = bb->fmt, FG.id = 0;
         rt_log("ffx: FSR 3.1 frame generation context %ux%u", bb->w, bb->h);
+        if (A.query) {
+            ffxQueryGetProviderVersion version = {};
+            version.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+            if (A.query(&FG.ctx, &version.header) == FFX_API_RETURN_OK)
+                rt_log("ffx: selected frame-generation provider %s (id %llu)",
+                       version.versionName ? version.versionName : "unnamed", (unsigned long long)version.versionId);
+        }
     }
     int reset = in->reset || (FG.last_frame && in->frame != FG.last_frame + 1);
     FG.id++;
@@ -333,7 +343,8 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
         float scale = strtof(meters, nullptr);
         if (scale >= 0.0001f && scale <= 100.f) pr.viewSpaceToMetersFactor = scale;
     }
-    VkTmpRes rz = {in->depth, VK_FORMAT_R32_SFLOAT, in->w, in->h}, rm = {in->mv, VK_FORMAT_R16G16_SFLOAT, in->w, in->h};
+    VkTmpRes rz = {in->depth, VK_FORMAT_R32_SFLOAT, in->w, in->h},
+             rm = {in->mv, VK_FORMAT_R16G16_SFLOAT, display_mv ? bb->w : in->w, display_mv ? bb->h : in->h};
     pr.depth = res(&rz, 0);
     pr.motionVectors = res(&rm, 0);
     const float *v = in->cam;
