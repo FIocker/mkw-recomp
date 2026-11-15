@@ -56,7 +56,7 @@ static const char *const known[] = {
     "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_TEX_POOL_MIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VRAM_LOG", "VRAM_MARGIN", "VS_OUTS",
     "UPDATE_AS", "UPDATE_CHECK", "UPDATE_REPO", "WINDOW_SIZE", "ZSTD_CHECK", "ZSTD_NATIVE",
     // temporal upscaling and frame generation (gfx/vk/exec/vk_temporal.c), Reflex (gfx/vk/device/vk_reflex.c)
-    "TEMPORAL", "TEMPORAL_QUALITY", "TEMPORAL_SHARPNESS", "TEMPORAL_KART", "TEMPORAL_DEBUG", "TEMPORAL_JSIGN",
+    "CAS", "CAS_SHARPNESS", "DLSSG_EXP", "NGX_LOG", "TEMPORAL_KART_CIRCLE", "TEMPORAL", "TEMPORAL_QUALITY", "TEMPORAL_SHARPNESS", "TEMPORAL_KART", "TEMPORAL_DEBUG", "TEMPORAL_JSIGN",
     "TEMPORAL_HDR", "TEMPORAL_NGX", "DLSS_PRESET", "FG_ENGINE", "REFLEX",
 };
 
@@ -65,7 +65,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"FULLSCREEN", "display"}, {"WINDOW_SIZE", "display"}, {"PERF_OVERLAY", "display"}, {"VK_PRESENT", "display"},
     {"GPU_INDEX", "display"}, {"UPSCALER", "display"}, {"HDR", "display"}, {"SHARPNESS", "display"}, {"PICTURE_FIT", "display"},
     {"DEVICE_PROFILE", "display"}, {"RESOLUTION", "display"}, {"ASPECT", "display"}, {"FPS", "display"}, {"FRAMEGEN", "display"},
-    {"TEMPORAL", "display"}, {"TEMPORAL_QUALITY", "display"}, {"TEMPORAL_SHARPNESS", "display"}, {"TEMPORAL_KART", "display"},
+    {"CAS", "display"}, {"CAS_SHARPNESS", "display"}, {"TEMPORAL", "display"}, {"TEMPORAL_QUALITY", "display"}, {"TEMPORAL_SHARPNESS", "display"}, {"TEMPORAL_KART", "display"},
     {"DLSS_PRESET", "display"}, {"FG_ENGINE", "display"}, {"REFLEX", "display"},
     {"QUALITY", "graphics"}, {"ANISO", "graphics"}, {"TEX_QUALITY", "graphics"}, {"DETAIL_DISTANCE", "graphics"}, {"SHADOW_SIZE", "graphics"},
     {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"}, {"LAN", "language"},
@@ -111,7 +111,7 @@ static const CfgMeta metas[] = {
     // game's 3D resolution (romfs_res.c) and applies at the next start
     {"TEMPORAL", "off", "off|dlss|fsr3", LIVE},
     {"TEMPORAL_QUALITY", "quality", "native|quality|balanced|performance|ultra", RESTART},
-    {"TEMPORAL_SHARPNESS", "20", "0..100", LIVE}, {"TEMPORAL_KART", "1", "0|1", LIVE},
+    {"TEMPORAL_SHARPNESS", "20", "0..100", LIVE}, {"CAS", "off", "off|on", LIVE}, {"CAS_SHARPNESS", "50", "0..100", LIVE}, {"TEMPORAL_KART", "1", "0|1", LIVE},
     {"DLSS_PRESET", "default", "default|j|k|l|m", LIVE},
     // frame generation's engine: the port's own optical flow, DLSS Frame Generation or FSR 3.1 frame generation
     {"FG_ENGINE", "flow", "flow|dlss|fsr3", LIVE},

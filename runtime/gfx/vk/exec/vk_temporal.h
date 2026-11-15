@@ -17,7 +17,8 @@ int vk_tmp_scene_permille(void);
 
 // Device creation (vk_device.c): what NGX needs, added to the lists; after the device exists, NGX and FFX come up.
 void vk_tmp_instance_exts(const char **ext, uint32_t *n, uint32_t max);
-void vk_tmp_device_exts(const VkExtensionProperties *have, uint32_t nhave, const char **ext, uint32_t *n, uint32_t max);
+void vk_tmp_device_exts(VkInstance inst, VkPhysicalDevice phys, const VkExtensionProperties *have, uint32_t nhave,
+                        const char **ext, uint32_t *n, uint32_t max);
 void vk_tmp_device_init(void);
 void vk_tmp_shutdown(void);   // before the device goes
 

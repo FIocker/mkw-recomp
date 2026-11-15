@@ -187,6 +187,10 @@ static void tab_screen(float scale) {
         static const char *const pv[] = {"default", "j", "k", "l", "m"};
         const char *pn[5] = {"Default", "J", "K", "L", "M"};
         opt_choice_list("MKW_DLSS_PRESET", UI_MENU_DLSS_PRESET, pv, pn, 5, UI_MENU_DLSS_PRESET_DESC);
+        static const char *const cv[] = {"off", "on"};   // CAS on the upscaler's picture (vk_temporal.c), live
+        const char *cn[2] = {menu_text(UI_MENU_PERF_OFF), "On"};
+        opt_choice_list("MKW_CAS", UI_MENU_CAS, cv, cn, 2, UI_MENU_CAS_DESC);
+        opt_slider("MKW_CAS_SHARPNESS", UI_MENU_CAS_SHARPNESS, 0, 100, UI_MENU_CAS_SHARPNESS_DESC, 5, "%.0f %%");
     }
     opt_group(UI_MENU_GRAPHICS);
     static const UiTextId fit[] = {UI_MENU_PICTURE_FIT_KEEP, UI_MENU_PICTURE_FIT_STRETCH};

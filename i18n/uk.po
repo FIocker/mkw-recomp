@@ -490,6 +490,24 @@ msgid ""
 "NVIDIA's model DLSS uses: the default of the DLSS version next to the game, or presets J, K, L, M."
 msgstr ""
 
+msgctxt "UI_MENU_CAS"
+msgid "CAS sharpening"
+msgstr ""
+
+msgctxt "UI_MENU_CAS_DESC"
+msgid ""
+"AMD's contrast adaptive sharpening of the race after DLSS or FSR 3.1, before the HUD is drawn. "
+"Needs AI upscaling on."
+msgstr ""
+
+msgctxt "UI_MENU_CAS_SHARPNESS"
+msgid "CAS strength"
+msgstr ""
+
+msgctxt "UI_MENU_CAS_SHARPNESS_DESC"
+msgid "How strongly CAS sharpens: 0 is the lightest touch, 100 the strongest."
+msgstr ""
+
 msgctxt "UI_MENU_GRAPHICS"
 msgid "Picture"
 msgstr "Зображення"

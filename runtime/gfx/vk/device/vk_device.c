@@ -349,7 +349,7 @@ static int create_device(void) {
         gpl_link = tail;
         CHAIN(gpl, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT);
     }
-    vk_tmp_device_exts(ep, ne, ext, &n_ext, 48);   // NGX's (vk_temporal.c)
+    vk_tmp_device_exts(g_vk.instance, g_vk.phys, ep, ne, ext, &n_ext, 48);   // NGX's (vk_temporal.c)
     // NVIDIA Reflex (vk_latency.c): VK_NV_low_latency2, and VK_KHR_present_id so its markers name the presents
     for (uint32_t i = 0; i < ne; i++)
         if (!strcmp(ep[i].extensionName, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) && n_ext < 46)

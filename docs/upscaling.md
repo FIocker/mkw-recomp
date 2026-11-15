@@ -8,8 +8,10 @@ Optional, off by default. Settings in `mkw.ini` (section `[display]`) or the F1 
 | `temporal_quality` | `native`, `quality`, `balanced`, `performance`, `ultra` | The share of the screen's lines the race renders at (100, 67, 58, 50, 33 %). The game renders at most 1440 lines. At the next start |
 | `dlss_preset` | `default`, `j`, `k`, `l`, `m` | DLSS's model. Live |
 | `temporal_sharpness` | `0`..`100` | FSR 3.1's sharpening. Live |
+| `cas` | `off`, `on` | AMD's contrast adaptive sharpening (CAS) of the race after DLSS, DLAA or FSR 3.1, before the HUD. Needs `temporal` on. Live |
+| `cas_sharpness` | `0`..`100` | CAS's strength. Live |
 | `framegen` | `off`, `auto`, `2`, `3`, `4` | Frames shown per game frame (the port's existing setting) |
-| `fg_engine` | `flow`, `dlss`, `fsr3` | Who makes those frames: the port's optical flow, DLSS Frame Generation (RTX 40/50; `nvngx_dlssg.dll` next to `mkw.exe`; up to 4x on RTX 50) or FSR 3.1 frame generation (2x; `amd_fidelityfx_framegeneration_vk.dll`). DLSS-G and FSR FG need `temporal` on: they use its depth and motion vectors. Live |
+| `fg_engine` | `flow`, `dlss`, `fsr3` | Who makes those frames: the port's optical flow, DLSS Frame Generation (RTX 40/50; `nvngx_dlssg.dll` next to `mkw.exe`; up to 4x on RTX 50) or FSR 3.1 frame generation (2x; `amd_fidelityfx_framegeneration_vk.dll`). DLSS-G and FSR FG need `temporal` on: they use its depth and motion vectors. DLSS-G currently gives a blend of the two frames, no smoother than 60 fps (below). Live |
 | `reflex` | `off`, `on`, `boost` | NVIDIA Reflex through `VK_NV_low_latency2`. Live |
 
 With `resolution = 2160` (or a window taller than 1440 lines with `temporal` on), the upscaler writes the full output
@@ -31,4 +33,13 @@ DLSS and DLSS Frame Generation go through NGX, loaded from the NVIDIA driver at 
 FSR 3.1 through AMD's FidelityFX API DLLs (`runtime/third_party/ffx_sdk`, MIT headers). Frame generation keeps the
 port's presenter (`vk_framegen.c`): only the frame synthesis changes. Reflex: `vk_reflex.c` / `vk_latency.c`.
 
-Diagnostics: `MKW_TEMPORAL_DEBUG=mv|nojitter`, `MKW_TEMPORAL_JSIGN`, `MKW_TEMPORAL_TRACE=<frame>`, `MKW_TEMPORAL_KART=0`.
+The player's kart moves with the camera, so camera motion is wrong for it: near pixels in the kart's part of the screen
+that match the last frame's picture better standing still than moved with the camera get no motion (a circle around
+the kart's place on the first frame; `MKW_TEMPORAL_KART_CIRCLE=1` keeps the circle).
+
+Known: DLSS Frame Generation's made frames come out as an even blend of the two game frames, whatever its depth, motion
+vectors or camera say (measured with `MKW_FG_DUMP`; only `Reset` changes them). `fg_engine = flow` or `fsr3` until
+that is found.
+
+Diagnostics: `MKW_TEMPORAL_DEBUG=mv|nojitter`, `MKW_TEMPORAL_JSIGN`, `MKW_TEMPORAL_TRACE=<frame>`, `MKW_TEMPORAL_KART=0`,
+`MKW_NGX_LOG=1|2` (NGX's own log lines in ours), `MKW_DLSSG_EXP=<mask>` (vk_temporal.c vk_tmp_dlssg), `MKW_FG_DUMP`.

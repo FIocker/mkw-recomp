@@ -7,34 +7,64 @@
 // The scene is drawn with the port's y flip (vk_exec_cb.c record_fixed: negative viewport height), so image row 0 is
 // NDC y = +1, and with NVN's minus-w depth mode (VK_EXT_depth_clip_control negativeOneToOne): NDC z = 2 * depth - 1.
 // Sky pixels (depth 1) reproject as points at infinity: their w goes to zero, so they get the rotation alone.
+//
+// The player's kart and driver move with the camera, so the camera's motion is wrong for them: moved like the road
+// under them, DLSS smears them and frame generation tears the driver's head and the road around the kart. Near pixels
+// in the kart's part of the screen are tested against the last frame's picture: where the pixel and its neighbours
+// match the last picture at the same place clearly better than at the camera's place, they stay still (motion 0).
+// Without a last picture (the first frame, a size change) a circle around the kart's place stands in.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D depth_tex;
 layout(binding = 1, rg16f) uniform writeonly image2D mv_out;
 layout(binding = 2, r32f) uniform writeonly image2D depth_out;   // the depth as a plain R32F image (FSR 3.1, frame generation)
+layout(binding = 3) uniform sampler2D cur_col;                   // this frame's scene colour (before SMAA)
+layout(binding = 4) uniform sampler2D prev_col;                  // the last frame's
 layout(push_constant) uniform P {
     mat4 reproj;     // column-major as GLSL reads it: clip_prev = reproj * clip_this
     vec2 size;       // render size in pixels
     vec2 pad;
-    vec4 kart;       // x: radius (0: off), yz: centre in UV, w: depth below which a pixel counts as the player's kart
+    vec4 kart;       // x: radius (0: off), yz: centre in UV, w: depth below which a pixel may be the player's kart
+    vec4 still;      // x: 1 when prev_col is the last frame's at this size, y: top of the kart's area (UV), z: its half
+                     // width, w: how much better the still match must be (the camera's error times this)
 } p;
+
+float luma(vec3 c) { return dot(min(c, vec3(4.0)), vec3(0.299, 0.587, 0.114)); }
 
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
-    if (px.x >= int(p.size.x) || px.y >= int(p.size.y)) return;
+    ivec2 sz = ivec2(p.size);
+    if (px.x >= sz.x || px.y >= sz.y) return;
     vec2 uv = (vec2(px) + 0.5) / p.size;
     float d = texelFetch(depth_tex, px, 0).r;
     vec2 mv = vec2(0.0);
-    // The player's kart moves with the camera: its pixels near the bottom middle and close to the camera keep still
-    // (camera-only reprojection would move them like the ground under them and DLSS would smear them).
-    bool kart = p.kart.x > 0.0 && d < p.kart.w && distance(uv, p.kart.yz) < p.kart.x;
-    if (!kart) {
-        vec4 clip = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d * 2.0 - 1.0, 1.0);
-        vec4 prev = p.reproj * clip;
-        if (abs(prev.w) > 1e-7) {
-            vec2 ndc = prev.xy / prev.w;
-            vec2 puv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-            mv = (puv - uv) * p.size;
+    vec4 clip = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d * 2.0 - 1.0, 1.0);
+    vec4 prev = p.reproj * clip;
+    if (abs(prev.w) > 1e-7) {
+        vec2 ndc = prev.xy / prev.w;
+        vec2 puv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        mv = (puv - uv) * p.size;
+    }
+    if (p.kart.x > 0.0 && d < p.kart.w) {
+        bool kart;
+        if (p.still.x > 0.5) {
+            kart = false;
+            if (uv.y > p.still.y && abs(uv.x - 0.5) < p.still.z) {
+                // 3x3 taps two pixels apart: the error of standing still against the error of the camera's motion
+                float es = 0.0, ec = 0.0;
+                ivec2 cm = ivec2(round(mv));
+                for (int y = -1; y <= 1; y++)
+                    for (int x = -1; x <= 1; x++) {
+                        ivec2 q = clamp(px + ivec2(x, y) * 2, ivec2(0), sz - 1);
+                        float c = luma(texelFetch(cur_col, q, 0).rgb);
+                        es += abs(c - luma(texelFetch(prev_col, q, 0).rgb));
+                        ec += abs(c - luma(texelFetch(prev_col, clamp(q + cm, ivec2(0), sz - 1), 0).rgb));
+                    }
+                kart = es < ec * p.still.w && ec > 0.15;
+            }
+        } else {
+            kart = distance(uv, p.kart.yz) < p.kart.x;
         }
+        if (kart) mv = vec2(0.0);
     }
     imageStore(mv_out, px, vec4(mv, 0.0, 0.0));
     imageStore(depth_out, px, vec4(d, 0.0, 0.0, 0.0));

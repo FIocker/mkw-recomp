@@ -66,6 +66,7 @@ uint32_t surface(VkFormat f) {
     case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return FFX_API_SURFACE_FORMAT_R11G11B10_FLOAT;
     case VK_FORMAT_R16G16B16A16_SFLOAT: return FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT;
     case VK_FORMAT_R16G16_SFLOAT: return FFX_API_SURFACE_FORMAT_R16G16_FLOAT;
+    case VK_FORMAT_R32_SFLOAT:   // the depth as plain R32F (vk_temporal.c R.zs)
     case VK_FORMAT_D32_SFLOAT:
     case VK_FORMAT_D32_SFLOAT_S8_UINT: return FFX_API_SURFACE_FORMAT_R32_FLOAT;
     case VK_FORMAT_R8G8B8A8_UNORM: return FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
@@ -270,7 +271,12 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
             be.deviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
             d.header.pNext = &be.header;
         }
+        // under the queue lock, and finished before it is let go: FFX's backend may submit its own setup work to the
+        // device's queue while it makes the context (two runs faulted on a write to address 0 at the first frame)
+        vk_queue_lock();
         ffxReturnCode_t r = A.create(&FG.ctx, &d.header, nullptr);
+        vkDeviceWaitIdle(c->device);
+        vk_queue_unlock();
         if (r != FFX_API_RETURN_OK) {
             FG.ctx = nullptr, FG.failed = 1;
             rt_log("ffx: frame generation context %ux%u could not be created (%u): the port's own frame generation",
