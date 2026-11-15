@@ -371,7 +371,7 @@ static struct {
     int reset;                   // the next evaluation starts a new history
     uint64_t last_eval_ns;
     // stats, logged every 600 frames
-    uint64_t evals, cams_miss, prev_match, prev_differ, fails;
+    uint64_t evals, cams_miss, prev_match, prev_differ, fails, plain;
     uint64_t log_frame;
 } T = {.jsign = {1, 1}, .cfg_seen = ~0u, .reset = 1};
 
@@ -506,7 +506,9 @@ int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     }
     if (jit != T.draw_jit) T.draw_jit = jit, ex->dirty |= VK_EXEC_DIRTY_VIEWPORT;
     if (jit) T.jit_draws++;
-    if (T.engine == VK_TMP_OFF || !fs || T.done) return 1;
+    // the SMAA blend is followed also with the upscaler off: the game's own upscale after it draws black in this port
+    // (vanilla runs with 3D lines below the screen's, 15/11/2026), and vk_tmp_dispatch then scales it itself
+    if (!fs || T.done || (T.engine == VK_TMP_OFF && romfs_resolution_scene_permille() >= 1000)) return 1;
     uint64_t h = spv_hash(fs);
     if (h == SHADER_SMAA_BLEND || h == SHADER_SMAA_EDGE || h == SHADER_SMAA_WEIGHT) trace_hash("fs-smaa", h, ex);
     if (h != SHADER_SMAA_BLEND) return 1;
@@ -516,6 +518,7 @@ int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     if (!img_of(ex, ex->tex[1][0], &pre)) return 1;
     T.pre = pre;
     T.smaa_out = ex->color[0].image;   // the upscale dispatch reads it (vk_tmp_dispatch)
+    if (T.engine == VK_TMP_OFF) return 1;
     if (!ex->color[0].image || ex->color[0].width != pre.w || ex->color[0].height != pre.h) return 1;
     if (!T.cam_ok) return 1;
     // native: is this the screen target? The screen target is the one the HUD draws into, of the screen's size; the
@@ -538,8 +541,21 @@ static void trace_hash(const char *what, uint64_t h, const VkExec *ex) {
            ex->pass_w, ex->pass_h);
 }
 
+// The game's upscale scaled by a bilinear blit: the upscaler off, or a frame it cannot run on (no camera: menus).
+static int plain_scale(VkExec *ex, const Img *in, const Img *out) {
+    vk_exec_pass_end(ex);
+    vk_exec_barrier(ex);
+    VkImageBlit bl = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)in->w, (int32_t)in->h, 1}},
+                      {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)out->w, (int32_t)out->h, 1}}};
+    vkCmdBlitImage(ex->cb, in->image, VK_IMAGE_LAYOUT_GENERAL, out->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+    ex->recorded++;
+    vk_exec_barrier(ex);
+    T.plain++;
+    return 1;
+}
+
 int vk_tmp_dispatch(VkExec *ex, const GfxShader *cs) {
-    if (T.engine == VK_TMP_OFF || !T.smaa_out) return 0;
+    if (!T.smaa_out) return 0;
     // the game's upscale: the first dispatch after the SMAA blend that reads the blend's output (tex slot 0) and writes
     // a larger image (img slot 1). Its program changes with the ratio (5d920a71d444c084 at 1.25x, cc1d4db34f244182 at
     // 1.5x, measured 15/11/2026), so it is known by what it reads and writes.
@@ -548,17 +564,18 @@ int vk_tmp_dispatch(VkExec *ex, const GfxShader *cs) {
     T.smaa_out = VK_NULL_HANDLE;
     if (!img_of(ex, ex->img[NVN_STAGE_CS][1], &out) || out.w <= in.w || out.h <= in.h) return 0;
     T.upscale_frame = T.frame;
-    if (T.done) return 0;   // (the blend took it this frame, before the dispatch was known: one frame)
+    if (T.done) return plain_scale(ex, &in, &out);   // the blend took it this frame, before the dispatch was known
+    if (T.engine == VK_TMP_OFF) return plain_scale(ex, &in, &out);
     uint64_t hh = spv_hash(cs);
     static uint64_t told[8];
     for (int i = 0; i < 8; i++) {
         if (told[i] == hh) break;
         if (!told[i]) { told[i] = hh; rt_log("temporal: the game's upscale is cs %016llx (%ux%u -> %ux%u)", (unsigned long long)hh, in.w, in.h, out.w, out.h); break; }
     }
-    if (!T.cam_ok) { T.cams_miss++; return 0; }
+    if (!T.cam_ok) { T.cams_miss++; return plain_scale(ex, &in, &out); }
     // the tonemapped scene before SMAA, when the blend ran this frame at the size of the dispatch's input
     const Img *color = T.pre.image && T.pre.w == in.w && T.pre.h == in.h ? &T.pre : &in;
-    return run_upscaler(ex, color, &out, 0);
+    return run_upscaler(ex, color, &out, 0) || plain_scale(ex, &in, &out);
 }
 
 // ---------------------------------------------------------------- the passes' own resources
@@ -1074,9 +1091,10 @@ void vk_tmp_present(uint64_t frame) {
     }
     if (frame >= T.log_frame + 600 && (T.evals || T.engine != VK_TMP_OFF)) {
         rt_log("temporal: %llu evaluations, jittered draws %llu, frames without a camera at the upscale %llu, the game's "
-               "previous camera equal to ours %llu / differing %llu, failures %llu",
+               "previous camera equal to ours %llu / differing %llu, failures %llu, plain scales %llu",
                (unsigned long long)T.evals, (unsigned long long)T.jit_draws, (unsigned long long)T.cams_miss,
-               (unsigned long long)T.prev_match, (unsigned long long)T.prev_differ, (unsigned long long)T.fails);
+               (unsigned long long)T.prev_match, (unsigned long long)T.prev_differ, (unsigned long long)T.fails,
+               (unsigned long long)T.plain);
         T.log_frame = frame;
     }
     plat_mutex_lock(&tlock);
