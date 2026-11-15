@@ -290,19 +290,31 @@ static void flip_one_locked_id(uint64_t present_id) {
                            .pImageIndices = &idx};
     VkPresentIdKHR pid = {.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR, .swapchainCount = 1, .pPresentIds = &present_id};
     if (present_id && vk_ctx()->has_present_id) pi.pNext = &pid;   // Reflex (vk_latency.c)
+    uint64_t l0 = kern_now_ns();
     vk_queue_lock();
-    uint64_t begin = (rt_trace & RT_TRACE_PRESENT) ? kern_now_ns() : 0;
+    uint64_t begin = kern_now_ns();
     VkResult r = vkQueuePresentKHR(q, &pi);
-    uint64_t end = begin ? kern_now_ns() : 0;
+    uint64_t end = kern_now_ns();
     vk_queue_unlock();
     // The source-group trace in vk_backend.c cannot reveal uneven spacing between generated frames. These are host
     // queue-call timestamps, including every generated flip; display/scanout timing still requires a presentation trace.
-    if (begin) {
+    if (rt_trace & RT_TRACE_PRESENT) {
         static uint64_t last;
         rt_log("flip: start_ns %llu interval %.3f ms, queue %.3f ms, id %llu, result %d",
                (unsigned long long)begin, last ? (double)(begin - last) / 1e6 : 0., (double)(end - begin) / 1e6,
                (unsigned long long)present_id, (int)r);
         last = begin;
+    }
+    {   // MKW_TRACE=present: the time each present waited for the queue lock and spent in vkQueuePresentKHR (holding it)
+        static double lw, pr, pm;
+        static unsigned n;
+        lw += (begin - l0) / 1e6, pr += (end - begin) / 1e6, n++;
+        if ((end - begin) / 1e6 > pm) pm = (end - begin) / 1e6;
+        if (n == 1200) {
+            if (rt_trace & RT_TRACE_PRESENT)
+                rt_log("present: vkQueuePresentKHR %.3f ms mean, %.3f max; queue lock waited %.3f ms mean", pr / n, pm, lw / n);
+            lw = pr = pm = 0, n = 0;
+        }
     }
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
 }
@@ -639,7 +651,19 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         goto out;
     }
     uint32_t idx = 0;
+    uint64_t a0 = kern_now_ns();
     VkResult r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+    {
+        static double as, am;
+        static unsigned an;
+        double t = (kern_now_ns() - a0) / 1e6;
+        as += t, an++;
+        if (t > am) am = t;
+        if (an == 1200) {
+            if (rt_trace & RT_TRACE_PRESENT) rt_log("present: vkAcquireNextImageKHR %.3f ms mean, %.3f max", as / an, am);
+            as = am = 0, an = 0;
+        }
+    }
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         plat_xchg32(&g_dirty, 1);
         if (!create_swapchain()) goto out;

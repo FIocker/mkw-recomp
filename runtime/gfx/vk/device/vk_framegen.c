@@ -495,6 +495,23 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     // DLSS Frame Generation or FSR 3.1 frame generation (MKW_FG_ENGINE, vk_temporal.c) in the place of the optical flow,
     // from the same game frame's depth, motion vectors and camera; the flow below when they cannot
     int eng = !strcmp(cfg_value("MKW_FG_ENGINE"), "dlss") ? 1 : !strcmp(cfg_value("MKW_FG_ENGINE"), "fsr3") ? 2 : 0;
+    // MKW_FG_TEST=copy (measuring): the made frames are copies of the game's, so the present cadence is frame
+    // generation's with next to no GPU work
+    static int copy_test = -1;
+    if (copy_test < 0) copy_test = cfg_get("MKW_FG_TEST") && !strcmp(cfg_get("MKW_FG_TEST"), "copy");
+    if (copy_test && made) {
+        mem_barrier(cb);
+        VkImageCopy ic = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0},
+                          {(uint32_t)cw, (uint32_t)ch, 1}};
+        for (int k = 0; k < made; k++) vkCmdCopyImage(cb, F.pic[cur].img, VK_IMAGE_LAYOUT_GENERAL, F.made[k].img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+        mem_barrier(cb);
+        for (int k = 0; k < made; k++) out[k] = F.made[k].img;
+        out[made] = F.pic[cur].img;
+        *ow = cw, *oh = ch;
+        F.have_prev = 1, F.cur = prev, F.hl_okp = F.hp_okp = 0;
+        return made + 1;
+    }
+    // an HDR10 picture (10-bit PQ) goes to them in its own format
     int hdr = vk_fg_src_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || vk_fg_src_format == VK_FORMAT_R16G16B16A16_SFLOAT;
     // SDR-only diagnostic: the native synthesis of exactly the two source pictures used by the real FSR generation.
     // It is read back beside the FSR frame and is never included in out[] or presented.

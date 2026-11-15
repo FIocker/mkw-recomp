@@ -429,6 +429,13 @@ static int create_device(void) {
                 if (qp[i].queueCount && (qp[i].queueFlags & VK_QUEUE_OPTICAL_FLOW_BIT_NV)) { g_vk.of_family = i; break; }
         }
         if (g_vk.of_family == VK_QUEUE_FAMILY_IGNORED) g_vk.has_oflow = 0;
+        // MKW_FG_QUEUE_PRIO (0..1, default 0): the game's queue goes first where both have work. The game waits for
+        // its GPU work inside its frame, so generation running beside it lengthened its frames; a made frame has
+        // half a game frame to be ready
+        const char *pe = cfg_get("MKW_FG_QUEUE_PRIO");
+        prios[1] = pe ? (float)atof(pe) : 0.0f;
+        if (prios[1] < 0.0f) prios[1] = 0.0f;
+        if (prios[1] > 1.0f) prios[1] = 1.0f;
     }
     VkDeviceQueueCreateInfo qi[3] = {
         {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family, .queueCount = gq,
