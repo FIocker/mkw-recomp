@@ -185,6 +185,14 @@ int probe_fsr_fg(void) {
         CHECK(!fclose(f));
     }
     int ok = !vk_validation_errors_total() && error[2]/(3*count[2]) < 8;
+    const char *limit = cfg_get("MKW_FSR_PROBE_SHADOW_LIMIT");
+    if (limit) {
+        float maximum = strtof(limit,NULL);
+        CHECK(isfinite(maximum) && maximum > 0);
+        int quality = error[1]/(3*count[1]) <= maximum && error[0]/(3*count[0]) <= 2;
+        printf("probe-fsr-fg: analytical shadow quality gate <= %.3f /255, body <=2: %s\n",maximum,quality?"passed":"FAILED");
+        ok = ok && quality;
+    }
     vk_tmp_ffx_shutdown();
     vkDestroyFence(c->device,fence,NULL); vkDestroyCommandPool(c->device,pool,NULL);
     for (int i = 0; i < 4; i++) { vkDestroyImageView(c->device,views[i],NULL); vmaDestroyImage(c->vma,images[i],allocations[i]); }
