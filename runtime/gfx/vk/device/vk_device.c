@@ -251,6 +251,7 @@ typedef struct {
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pexe;
     VkPhysicalDevicePresentIdFeaturesKHR presentid;
     VkPhysicalDeviceOpticalFlowFeaturesNV oflow;
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR compute_derivatives;
     VkPhysicalDeviceComputeOccupancyPriorityFeaturesNV occ;
     VkPhysicalDevicePresentWaitFeaturesKHR pwait;
 } FeatureChain;
@@ -262,6 +263,7 @@ static int create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
     const char *ext[48];   // every optional extension at once nears 32
     uint32_t n_ext = 0;
+    int has_compute_derivatives = 0;
     for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
 
     FeatureChain *c = calloc(1, sizeof *c);
@@ -274,6 +276,14 @@ static int create_device(void) {
     CHAIN(clip, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT);
 #define OPTIONAL_EXT(flag, name, member, stype) do { \
         if (has_ext(ep, ne, name)) { g_vk.flag = 1; ext[n_ext++] = name; CHAIN(member, stype); } } while (0)
+    // Recent DXC gives the SDK's SPD QuadReadAcross operations explicit linear compute-quad semantics. Keep the
+    // optional capability confined to source-provider experiments; ordinary shipped provider/device defaults stay.
+    const char *ffx_library = cfg_get("MKW_FFX_LIBRARY");
+    if (ffx_library && *ffx_library && has_ext(ep, ne, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME)) {
+        has_compute_derivatives = 1;
+        ext[n_ext++] = VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME;
+        CHAIN(compute_derivatives, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR);
+    }
     OPTIONAL_EXT(has_custom_border_color, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME, cbc, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT);
     OPTIONAL_EXT(has_eds, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME, eds, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT);
     OPTIONAL_EXT(has_eds2, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME, eds2, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT);
@@ -372,6 +382,10 @@ static int create_device(void) {
     // The driver fills the chain with what it supports; the same chain then enables all of it (robustBufferAccess
     // stays on: guest shaders index constant buffers freely and out-of-range reads must stay harmless).
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &c->f2);
+    if (ffx_library && *ffx_library)
+        rt_log("vk: source FSR provider compute-quad derivatives: extension %d, linear %d, quads %d",
+               has_compute_derivatives, c->compute_derivatives.computeDerivativeGroupLinear,
+               c->compute_derivatives.computeDerivativeGroupQuads);
     vk_caps_features(&c->f2.features);
     if (gpl_link) {
         VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT gp = {
