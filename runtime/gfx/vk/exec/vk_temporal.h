@@ -70,3 +70,5 @@ int vk_tmp_ffx_upscale(VkCommandBuffer cb, const VkTmpRes *color, const VkTmpRes
                        const VkTmpRes *out, float jx, float jy, int reset, float frame_ms, float znear, float zfar,
                        float fov_y, int hdr, float sharpness);
 void vk_tmp_ffx_shutdown(void);
+// fn(arg) once the GPU is done with the submission being recorded (at once outside a recording)
+void vk_tmp_defer(void (*fn)(void *), void *arg);

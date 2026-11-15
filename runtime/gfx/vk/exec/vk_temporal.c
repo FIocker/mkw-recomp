@@ -612,13 +612,33 @@ static struct {                  // what each evaluation leaves for frame genera
     double m[16];                // this frame's clip space to the last's
 } FS[FG_SLOTS];
 
+// The replay may not wait for the GPU: a submission already queued can wait on a timeline value that only the one
+// being recorded signals (a vkDeviceWaitIdle here hung a run). What the GPU may still use goes once the submission
+// being recorded is done (vk_completion_add at its fence), and new images go to GENERAL in its command buffer.
+static uint64_t tmp_fence;     // the fence of the submission run_upscaler records into
+static VkCommandBuffer tmp_cb;
+
+typedef struct { VkImage img; VmaAllocation mem; VkImageView view; } OwnGone;
+static void own_free(void *arg) {   // completion thread
+    OwnGone *g = arg;
+    const VkCtx *c = vk_ctx();
+    if (c) vkDestroyImageView(c->device, g->view, NULL), vmaDestroyImage(c->vma, g->img, g->mem);
+    free(g);
+}
+
+void vk_tmp_defer(void (*fn)(void *), void *arg) {
+    if (tmp_fence) vk_completion_add(tmp_fence, fn, arg);
+    else fn(arg);   // (outside a recording: nothing of this run uses it)
+}
+
 static int own_image(Own *o, uint32_t w, uint32_t h, VkFormat f) {
     if (o->img && o->w == w && o->h == h && o->fmt == f) return 1;
     const VkCtx *c = vk_ctx();
-    if (o->img) {   // a size change: the old one waits for the GPU through the device idle (rare: DRS or a mode change)
-        vkDeviceWaitIdle(c->device);
-        vkDestroyImageView(c->device, o->view, NULL);
-        vmaDestroyImage(c->vma, o->img, o->mem);
+    if (o->img) {   // a size change (the game's dynamic resolution, a mode change)
+        OwnGone *g = malloc(sizeof *g);
+        if (!g) rt_fatal("temporal: out of memory");
+        *g = (OwnGone){o->img, o->mem, o->view};
+        vk_tmp_defer(own_free, g);
         *o = (Own){0};
     }
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f,
@@ -643,35 +663,17 @@ static int own_image(Own *o, uint32_t w, uint32_t h, VkFormat f) {
         return 0;
     }
     o->w = w, o->h = h, o->fmt = f;
-    // to GENERAL at once, on a command buffer of its own: every image of the replay stays in GENERAL
-    VkCommandPool pool;
-    VkCommandPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = c->gfx_family};
-    if (vkCreateCommandPool(c->device, &pci, NULL, &pool) == VK_SUCCESS) {
-        VkCommandBuffer cb;
-        VkCommandBufferAllocateInfo cai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool,
-                                           .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
-        vkAllocateCommandBuffers(c->device, &cai, &cb);
-        VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-        vkBeginCommandBuffer(cb, &bi);
-        VkImageMemoryBarrier2 b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-                                   .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                   .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                   .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                   .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                   .image = o->img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
-                               .pImageMemoryBarriers = &b};
-        vkCmdPipelineBarrier2(cb, &di);
-        vkEndCommandBuffer(cb);
-        VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
-        vk_queue_lock();
-        vkQueueSubmit(c->gfx_queue, 1, &si, VK_NULL_HANDLE);
-        vkQueueWaitIdle(c->gfx_queue);
-        vk_queue_unlock();
-        vkDestroyCommandPool(c->device, pool, NULL);
-    }
+    // to GENERAL in the command buffer being recorded (the calls are direct here: run_upscaler drained the recorder)
+    VkImageMemoryBarrier2 b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                               .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                               .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                               .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                               .image = o->img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
+                           .pImageMemoryBarriers = &b};
+    vkCmdPipelineBarrier2(tmp_cb, &di);
     return 1;
 }
 
@@ -810,13 +812,22 @@ typedef struct {
     uint32_t w, h, ow, oh;   // render size it was created for (the largest it takes), output size
     int q, preset, hdr;
 } Feat;
-static Feat F;
+// A few features at once: in some frames (HDR10 output, no HUD) the game's upscale writes the output texture itself, of
+// another size than the screen target, and a feature for each kept the history of both (one feature made anew at
+// each switch waited for the GPU each time).
+#define FEATS 3
+static Feat FC[FEATS];
+static int fcur;
+static uint64_t fused[FEATS], ftick;
+#define F (FC[fcur])
 
 static int perf_quality(uint32_t w, uint32_t ow) {   // NVSDK_NGX_PerfQuality_Value from the area's ratio
     float r = (float)w / (float)ow;
     return r >= 0.95f ? 5 /* DLAA */ : r >= 0.64f ? 2 /* quality */ : r >= 0.55f ? 1 /* balanced */
          : r >= 0.45f ? 0 /* performance */ : 3 /* ultra performance */;
 }
+
+static void feat_release(void *f) { N.release((NgxHandle *)f); }   // completion thread
 
 static int dlss_feature(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow, uint32_t oh, int hdr) {
     // created for the largest render size the setting gives (the game's dynamic resolution only goes below it), so a
@@ -827,12 +838,25 @@ static int dlss_feature(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow,
     if (mh < h) mh = h;
     if (mw > ow) mw = ow;
     if (mh > oh) mh = oh;
-    if (F.feat && F.ow == ow && F.oh == oh && w <= F.w && h <= F.h && F.preset == T.preset && F.hdr == hdr) return 1;
+    ftick++;
+    for (int i = 0; i < FEATS; i++) {
+        Feat *e = &FC[i];
+        if (e->feat && e->ow == ow && e->oh == oh && w <= e->w && h <= e->h && e->preset == T.preset && e->hdr == hdr) {
+            if (i != fcur) T.reset = 1;   // its history is of an earlier frame
+            fcur = i, fused[i] = ftick;
+            return 1;
+        }
+    }
+    int pick = 0;
+    for (int i = 0; i < FEATS; i++) {
+        if (!FC[i].feat) { pick = i; break; }
+        if (fused[i] < fused[pick]) pick = i;
+    }
+    fcur = pick, fused[pick] = ftick;
     w = mw, h = mh;
     int q = perf_quality(w, ow);
-    if (F.feat) {
-        vkDeviceWaitIdle(vk_ctx()->device);
-        N.release(F.feat);
+    if (F.feat) {   // the least used one goes once the GPU is done with what used it
+        vk_tmp_defer(feat_release, F.feat);
         F.feat = NULL;
     }
     NgxParam *p = NULL;
@@ -940,6 +964,7 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
     vk_exec_pass_end(ex);
     vk_exec_barrier(ex);
     rec_drain();   // from here the calls are made at once, after everything queued before
+    tmp_fence = ex->fence, tmp_cb = cb;
     int slot = (int)(T.frame % FG_SLOTS);
     Own *MV = &R.mvs[slot], *Z = &R.zs[slot];
     if (!own_image(MV, w, h, VK_FORMAT_R16G16_SFLOAT) || !own_image(Z, w, h, VK_FORMAT_R32_SFLOAT)) return 0;
@@ -1123,7 +1148,8 @@ void vk_tmp_shutdown(void) {
     const VkCtx *c = vk_ctx();
     if (!c) return;
     vkDeviceWaitIdle(c->device);
-    if (F.feat && N.release) N.release(F.feat), F.feat = NULL;
+    for (int i = 0; i < FEATS; i++)
+        if (FC[i].feat && N.release) N.release(FC[i].feat), FC[i].feat = NULL;
     dlssg_release();
     vk_tmp_ffx_shutdown();
     Own *o[8] = {&R.mvs[0], &R.mvs[1], &R.mvs[2], &R.outimg, &R.zs[0], &R.zs[1], &R.zs[2], &R.big};
@@ -1169,7 +1195,9 @@ int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const V
     }
     NgxParam *p = G.p;
     if (G.feat && (G.w != bb->w || G.h != bb->h || G.fmt != bb->fmt)) {
+        vk_queue_lock();   // the present thread, as vk_framegen.c ensure_images
         vkDeviceWaitIdle(vk_ctx()->device);
+        vk_queue_unlock();
         N.release(G.feat);
         G.feat = NULL;
     }
@@ -1235,7 +1263,7 @@ int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const V
     p_setf(p, "DLSSG.CameraFar", in.far_);
     p_setf(p, "DLSSG.CameraFOV", in.fov_y);
     p_setf(p, "DLSSG.CameraAspectRatio", in.aspect);
-    p_setu(p, "DLSSG.ColorBuffersHDR", 0);
+    p_setu(p, "DLSSG.ColorBuffersHDR", bb->fmt != VK_FORMAT_R8G8B8A8_UNORM && bb->fmt != VK_FORMAT_R8G8B8A8_SRGB);
     p_setu(p, "DLSSG.DepthInverted", 0);
     p_setu(p, "DLSSG.CameraMotionIncluded", 1);
     int reset = G.reset || in.reset || (G.last_frame && frame != G.last_frame + 1);

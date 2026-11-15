@@ -58,6 +58,11 @@ static struct {
     // the images, for a w x h picture: the game's last two (rgba8), their luma at full size (lf), quarter size (lq) and
     // a sixteenth (le), the vectors of each level and their medians (coarse, fine, full size) and the made frames
     Img pic[2], lf[2], lq[2], le[2], fl[6], made[VK_FG_MAX - 1];
+    // DLSS-G and FSR 3.1 on an HDR10 picture: the game's picture and the made frames in its own 10-bit format (the
+    // optical flow's images above are 8-bit), made at first use
+    Img hpic, hmade[VK_FG_MAX - 1];
+    int hw, hh;
+    VkFormat hfmt;
     int w, h, fresh, cur, have_prev;
     int nomem_w, nomem_h;   // the size whose images did not fit: not tried again until the size changes
     float lambda, bias;
@@ -167,7 +172,9 @@ static void free_img(VkCtx *c, Img *m) {
 static void free_images(VkCtx *c) {
     for (int i = 0; i < 2; i++) free_img(c, &F.pic[i]), free_img(c, &F.lf[i]), free_img(c, &F.lq[i]), free_img(c, &F.le[i]);
     for (int i = 0; i < 6; i++) free_img(c, &F.fl[i]);
-    for (int i = 0; i < VK_FG_MAX - 1; i++) free_img(c, &F.made[i]);
+    for (int i = 0; i < VK_FG_MAX - 1; i++) free_img(c, &F.made[i]), free_img(c, &F.hmade[i]);
+    free_img(c, &F.hpic);
+    F.hw = F.hh = 0, F.hfmt = VK_FORMAT_UNDEFINED;
     F.w = F.h = 0;
     F.have_prev = 0;
 }
@@ -309,11 +316,41 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     // DLSS Frame Generation or FSR 3.1 frame generation (MKW_FG_ENGINE, vk_temporal.c) in the place of the optical flow,
     // from the same game frame's depth, motion vectors and camera; the flow below when they cannot
     int eng = !strcmp(cfg_value("MKW_FG_ENGINE"), "dlss") ? 1 : !strcmp(cfg_value("MKW_FG_ENGINE"), "fsr3") ? 2 : 0;
+    // an HDR10 picture (10-bit PQ) goes to them in its own format
+    int hdr = vk_fg_src_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || vk_fg_src_format == VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (made && eng && hdr && (F.hw != cw || F.hh != ch || F.hfmt != vk_fg_src_format)) {
+        vk_queue_lock();
+        vkDeviceWaitIdle(c->device);
+        vk_queue_unlock();
+        free_img(c, &F.hpic);
+        for (int i = 0; i < VK_FG_MAX - 1; i++) free_img(c, &F.hmade[i]);
+        const VkImageUsageFlags X = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        int ok = make_img(c, &F.hpic, (uint32_t)cw, (uint32_t)ch, vk_fg_src_format, X);
+        for (int i = 0; i < VK_FG_MAX - 1; i++) ok = ok && make_img(c, &F.hmade[i], (uint32_t)cw, (uint32_t)ch, vk_fg_src_format, X);
+        if (ok) {
+            F.hw = cw, F.hh = ch, F.hfmt = vk_fg_src_format;
+            Img *all[] = {&F.hpic, &F.hmade[0], &F.hmade[1], &F.hmade[2]};
+            for (int i = 0; i < 4; i++)
+                img_barrier(cb, all[i]->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
+                            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        } else {
+            F.hw = F.hh = 0;
+        }
+    }
+    int use_h = hdr && F.hw == cw && F.hh == ch;
+    if (made && eng && use_h) {   // the picture again, bit for bit in its own format
+        img_barrier(cb, src, VK_IMAGE_LAYOUT_GENERAL, ALL, VK_ACCESS_2_MEMORY_WRITE_BIT, XF, VK_ACCESS_2_TRANSFER_READ_BIT);
+        vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, F.hpic.img, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
+        mem_barrier(cb);
+    }
+    vk_fg_out_format = VK_FORMAT_R8G8B8A8_UNORM;
     if (made && eng) {
-        VkTmpPic bb = {F.pic[cur].img, F.pic[cur].view, VK_FORMAT_R8G8B8A8_UNORM, (uint32_t)cw, (uint32_t)ch};
+        VkFormat pf = use_h ? F.hfmt : VK_FORMAT_R8G8B8A8_UNORM;
+        const Img *P = use_h ? &F.hpic : &F.pic[cur], *M = use_h ? F.hmade : F.made;
+        VkTmpPic bb = {P->img, P->view, pf, (uint32_t)cw, (uint32_t)ch};
         VkTmpPic outs[VK_FG_MAX - 1];
         for (int k = 0; k < VK_FG_MAX - 1; k++)
-            outs[k] = (VkTmpPic){F.made[k].img, F.made[k].view, VK_FORMAT_R8G8B8A8_UNORM, (uint32_t)cw, (uint32_t)ch};
+            outs[k] = (VkTmpPic){M[k].img, M[k].view, pf, (uint32_t)cw, (uint32_t)ch};
         int got = 0;
         if (eng == 1) {
             got = vk_tmp_dlssg(cb, vk_fg_game_frame, &bb, outs, made);
@@ -326,8 +363,9 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             if (last_eng != eng) last_eng = eng, rt_log("vk: frame generation by %s", eng == 1 ? "DLSS Frame Generation" : "FSR 3.1");
             made = got;
             mem_barrier(cb);
-            for (int k = 0; k < made; k++) out[k] = F.made[k].img;
-            out[made] = F.pic[cur].img;
+            for (int k = 0; k < made; k++) out[k] = M[k].img;
+            out[made] = P->img;
+            vk_fg_out_format = pf;
             *ow = cw, *oh = ch;
             F.have_prev = 1;
             F.cur = prev;
@@ -387,6 +425,8 @@ int vk_fg_wanted(void) { return strcmp(cfg_value("MKW_FRAMEGEN"), "off") != 0; }
 // waits for the GPU then): tools/imagen/fg_check.py takes three g in a row (the made frame between the first and the
 // third against the second). MKW_SHOTS reads the game's pictures, black on some machines; these are what is shown.
 uint64_t vk_fg_game_frame;   // the game frame vk_fg_frame is called for (vk_backend.c present_main)
+VkFormat vk_fg_src_format = VK_FORMAT_R8G8B8A8_UNORM;   // that frame's picture format (vk_backend.c)
+VkFormat vk_fg_out_format = VK_FORMAT_R8G8B8A8_UNORM;   // the format of the frames vk_fg_frame handed out
 
 static struct { uint64_t at; VkBuffer buf; VmaAllocation alloc; void *map; VkDeviceSize size; } D;
 

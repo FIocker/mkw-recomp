@@ -67,8 +67,9 @@ static void present_main(void *arg) {
         int fw = 0, fh = 0;
         uint64_t step = 0;
         vk_fg_game_frame = j.frame;   // DLSS-G and FSR 3.1 take that frame's depth and motion (vk_temporal.c)
+        vk_fg_src_format = j.format;
         int nf = vk_fg_frame(j.image, j.w, j.h, j.has_crop ? j.crop : NULL, j.at, fo, &fw, &fh, &step);
-        for (int k = 0; k < nf; k++) vk_present_blit_ahead(fo[k], VK_IMAGE_LAYOUT_GENERAL, VK_FORMAT_R8G8B8A8_UNORM, fw, fh, NULL);
+        for (int k = 0; k < nf; k++) vk_present_blit_ahead(fo[k], VK_IMAGE_LAYOUT_GENERAL, vk_fg_out_format, fw, fh, NULL);
         if (!nf) vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
         uint64_t f = vk_sync_submit(NULL, 0);   // a timeline value after the blit: deferred destruction waits for the blit too
         if (j.value && f != j.value)

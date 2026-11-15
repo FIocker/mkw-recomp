@@ -19,6 +19,7 @@
 #include "vk/ffx_api_vk.h"
 
 extern "C" {
+#include "gfx.h"
 #include "host.h"
 #include "vk.h"
 #include "vk_temporal.h"
@@ -36,11 +37,19 @@ struct {
     int tried = 0, ok = 0, legacy = 0;   // legacy: amd_fidelityfx_vk.dll, which takes the deprecated backend descriptor
 } A;
 
-struct {
+// a few contexts at once, as vk_temporal.c keeps DLSS features: the game's upscale writes the output texture itself in
+// some frames, of another size than the screen target
+struct Ctx {
     ffxContext ctx = nullptr;
     uint32_t mw = 0, mh = 0, ow = 0, oh = 0;
     int hdr = -1;
-    int failed = 0;
+    uint64_t used = 0;
+};
+struct {
+    Ctx c[3];
+    int cur = 0, failed = 0;
+    uint64_t tick = 0;
+    ffxContext ctx = nullptr;   // the current one's
 } U;
 
 void message(uint32_t type, const wchar_t *msg) {
@@ -76,16 +85,38 @@ FfxApiResource res(const VkTmpRes *r, int write) {
     return ffxApiGetResourceVK((void *)r->image, d, FFX_API_RESOURCE_STATE_COMMON);
 }
 
+void ctx_destroy(void *ctx) {   // completion thread
+    ffxContext c = (ffxContext)ctx;
+    A.destroy(&c, nullptr);
+}
+
 void destroy_ctx() {
-    if (!U.ctx) return;
     vkDeviceWaitIdle(vk_ctx()->device);
-    A.destroy(&U.ctx, nullptr);
+    for (auto &c : U.c)
+        if (c.ctx) A.destroy(&c.ctx, nullptr), c.ctx = nullptr;
     U.ctx = nullptr;
 }
 
-int context_for(uint32_t mw, uint32_t mh, uint32_t ow, uint32_t oh, int hdr) {
-    if (U.ctx && U.ow == ow && U.oh == oh && mw <= U.mw && mh <= U.mh && U.hdr == hdr) return 1;
-    destroy_ctx();
+int context_for(uint32_t mw, uint32_t mh, uint32_t ow, uint32_t oh, int hdr, int *changed) {
+    U.tick++;
+    for (int i = 0; i < 3; i++) {
+        Ctx &x = U.c[i];
+        if (x.ctx && x.ow == ow && x.oh == oh && mw <= x.mw && mh <= x.mh && x.hdr == hdr) {
+            *changed = i != U.cur;
+            U.cur = i, x.used = U.tick, U.ctx = x.ctx;
+            return 1;
+        }
+    }
+    int pick = 0;
+    for (int i = 0; i < 3; i++) {
+        if (!U.c[i].ctx) { pick = i; break; }
+        if (U.c[i].used < U.c[pick].used) pick = i;
+    }
+    if (U.c[pick].ctx) {   // the least used one goes once the GPU is done with the submission being recorded
+        vk_tmp_defer(ctx_destroy, (void *)U.c[pick].ctx);
+        U.c[pick].ctx = nullptr;
+    }
+    U.cur = pick, *changed = 1;
     const VkCtx *c = vk_ctx();
     ffxCreateContextDescUpscale d = {};
     d.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
@@ -105,13 +136,15 @@ int context_for(uint32_t mw, uint32_t mh, uint32_t ow, uint32_t oh, int hdr) {
         be.deviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
         d.header.pNext = &be.header;
     }
-    ffxReturnCode_t r = A.create(&U.ctx, &d.header, nullptr);
+    Ctx &x = U.c[pick];
+    ffxReturnCode_t r = A.create(&x.ctx, &d.header, nullptr);
     if (r != FFX_API_RETURN_OK) {
-        U.ctx = nullptr;
+        x.ctx = nullptr, U.ctx = nullptr;
         if (U.failed++ < 4) rt_log("ffx: upscaling context %ux%u -> %ux%u could not be created (%u)", mw, mh, ow, oh, r);
         return 0;
     }
-    U.mw = mw, U.mh = mh, U.ow = ow, U.oh = oh, U.hdr = hdr;
+    x.mw = mw, x.mh = mh, x.ow = ow, x.oh = oh, x.hdr = hdr, x.used = U.tick;
+    U.ctx = x.ctx;
     rt_log("ffx: FSR upscaling context %ux%u -> %ux%u%s", mw, mh, ow, oh, hdr ? ", HDR" : "");
     return 1;
 }
@@ -154,7 +187,9 @@ extern "C" int vk_tmp_ffx_upscale(VkCommandBuffer cb, const VkTmpRes *color, con
                                   const VkTmpRes *out, float jx, float jy, int reset, float frame_ms, float znear,
                                   float zfar, float fov_y, int hdr, float sharpness) {
     if (!A.ok) return 0;
-    if (!context_for(color->w, color->h, out->w, out->h, hdr)) return 0;
+    int changed = 0;
+    if (!context_for(color->w, color->h, out->w, out->h, hdr, &changed)) return 0;
+    if (changed) reset = 1;
     ffxDispatchDescUpscale d = {};
     d.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
     d.commandList = (void *)cb;
@@ -176,7 +211,7 @@ extern "C" int vk_tmp_ffx_upscale(VkCommandBuffer cb, const VkTmpRes *color, con
     d.cameraFovAngleVertical = fov_y;
     d.viewSpaceToMetersFactor = 0.01f;   // MKW's world is in centimetres (a kart is ~150 units long)
     d.flags = hdr ? 0 : FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
-    ffxReturnCode_t r = A.dispatch(&U.ctx, &d.header);
+    ffxReturnCode_t r = A.dispatch(&U.c[U.cur].ctx, &d.header);
     if (r != FFX_API_RETURN_OK) {
         if (U.failed++ < 4) rt_log("ffx: upscale dispatch failed (%u)", r);
         return 0;
@@ -198,7 +233,9 @@ struct {
 
 void fg_destroy() {
     if (!FG.ctx) return;
+    vk_queue_lock();   // the present thread, as vk_framegen.c ensure_images
     vkDeviceWaitIdle(vk_ctx()->device);
+    vk_queue_unlock();
     A.destroy(&FG.ctx, nullptr);
     FG.ctx = nullptr;
 }
@@ -216,7 +253,8 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
     if (!FG.ctx) {
         ffxCreateContextDescFrameGeneration d = {};
         d.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
-        d.flags = 0;
+        int hdr = bb->fmt != VK_FORMAT_R8G8B8A8_UNORM && bb->fmt != VK_FORMAT_R8G8B8A8_SRGB;
+        d.flags = hdr ? FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE : 0;
         d.displaySize = {bb->w, bb->h};
         d.maxRenderSize = {bb->w, bb->h};
         d.backBufferFormat = surface(bb->fmt);
@@ -291,8 +329,13 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
     g.outputs[0] = pic(out, 1);
     g.numGeneratedFrames = 1;
     g.reset = reset != 0;
-    g.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
-    g.minMaxLuminance[0] = 0.f, g.minMaxLuminance[1] = 1.f;
+    int hdr = bb->fmt != VK_FORMAT_R8G8B8A8_UNORM && bb->fmt != VK_FORMAT_R8G8B8A8_SRGB;
+    uint16_t peak = 0, white = 0;
+    if (hdr) gfx_hdr_output(&peak, &white);
+    g.backbufferTransferFunction = !hdr ? FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB
+                                 : bb->fmt == VK_FORMAT_R16G16B16A16_SFLOAT ? FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SCRGB
+                                                                          : FFX_API_BACKBUFFER_TRANSFER_FUNCTION_PQ;
+    g.minMaxLuminance[0] = hdr ? 0.001f : 0.f, g.minMaxLuminance[1] = hdr ? (peak ? (float)peak : 1000.f) : 1.f;
     g.generationRect = {0, 0, (int32_t)bb->w, (int32_t)bb->h};
     g.frameID = FG.id;
     r = A.dispatch(&FG.ctx, &g.header);
