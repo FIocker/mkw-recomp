@@ -9,11 +9,12 @@ layout(binding = 1, rg16f) uniform writeonly image2D dst;
 layout(push_constant) uniform P {
     vec4 size;     // render width/height, output width/height
     ivec4 grid;    // grid width/height, cell side, reserved
+    vec4 jitter;   // current depth's render-pixel jitter; the optical-flow pictures are already resolved
 } p;
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(px, ivec2(p.size.xy)))) return;
-    vec2 output_px = (vec2(px) + 0.5) * p.size.zw / p.size.xy;
+    vec2 output_px = (vec2(px) + 0.5 - p.jitter.xy) * p.size.zw / p.size.xy;
     ivec2 block = clamp(ivec2(output_px) / p.grid.z, ivec2(0), p.grid.xy - 1);
     uint packed = flow.cells[block.y * p.grid.x + block.x];
     vec2 mv = vec2(float(int(packed << 16) >> 16), float(int(packed) >> 16)) / 32.0;

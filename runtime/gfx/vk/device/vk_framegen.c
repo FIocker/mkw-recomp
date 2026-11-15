@@ -59,7 +59,7 @@ static struct {
     VkPipeline of_mvp;
     VkOfResult of_result;
     uint64_t of_last_frame;
-    int of_active;
+    int of_active, of_hudless;
     VkSampler sampler;
     VkCommandPool pool;
     VkCommandBuffer cb[SLOTS];
@@ -401,7 +401,7 @@ static void fsr_motion_pass(VkCommandBuffer cb, const VkTmpFgInputs *in, const I
 }
 
 static int of_motion_pass(VkCommandBuffer cb, VkBuffer vectors, uint32_t gw, uint32_t gh, uint32_t grid,
-                          const Img *out, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh) {
+                          const Img *out, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, float jx, float jy) {
     VkCtx *c = vk_ctx();
     if (!F.of_mvp) {
         VkDescriptorSetLayoutBinding b[2] = {
@@ -409,7 +409,7 @@ static int of_motion_pass(VkCommandBuffer cb, VkBuffer vectors, uint32_t gw, uin
             {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
         VkDescriptorSetLayoutCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 2, .pBindings = b};
-        VkPushConstantRange pc = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+        VkPushConstantRange pc = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 48};
         if (vkCreateDescriptorSetLayout(c->device, &di, NULL, &F.of_dsl) != VK_SUCCESS) return 0;
         VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1, .pSetLayouts = &F.of_dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pc};
@@ -424,7 +424,8 @@ static int of_motion_pass(VkCommandBuffer cb, VkBuffer vectors, uint32_t gw, uin
          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi},
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii}};
-    struct { float size[4]; int grid[4]; } pc = {{(float)rw,(float)rh,(float)ow,(float)oh},{(int)gw,(int)gh,(int)grid,0}};
+    struct { float size[4]; int grid[4]; float jitter[4]; } pc = {
+        {(float)rw,(float)rh,(float)ow,(float)oh},{(int)gw,(int)gh,(int)grid,0},{jx,jy,0.f,0.f}};
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.of_mvp);
     rec_push(F.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.of_layout, 0, 2, wr);
     vkCmdPushConstants(cb, F.of_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
@@ -581,14 +582,8 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
         mem_barrier(cb);
         mv_ready = 1;
     }
-    if (mv_ready && of_wanted && !fgin.reset && vk_of_init(c->of_queue, c->of_family)) {
-        int reset = !F.of_last_frame || F.of_last_frame + 1 != fgin.frame;
-        F.of_active = vk_of_prepare(xc, F.pic[prev].view, F.pic[cur].view, (uint32_t)cw, (uint32_t)ch,
-                                    reset, &F.of_result);
-        if (F.of_active) F.of_last_frame = fgin.frame;
-    }
     int flow_ready = 0;
-    if (made && (eng == 0 || (mv_ready && !zero_mv && !F.of_active) || compare_native)) {
+    if (made && (eng == 0 || (mv_ready && !zero_mv && !of_wanted) || compare_native)) {
         // The SDK-only path avoids luma work, but FSR's optional object vectors and the readback reference need it
         // before their flow passes too. Both images may be stale after toggling the motion experiment in-run.
         for (int i = 0; i < 2; i++) {
@@ -673,6 +668,17 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
         // engine (DLSSG.HUDLess, HUDLessColor), which takes the HUD apart itself
         int own = hlp && strcmp(cfg_value("MKW_FG_HUD"), "engine") != 0 && hud_init(c);
         const VkTmpPic *in_pic = own ? &hl : &bb, *in_hl = own ? NULL : hlp;
+        if (mv_ready && of_wanted && !fgin.reset && vk_of_init(c->of_queue, c->of_family)) {
+            // The motion must describe the scene that FSR interpolates. Searching the full picture makes the static
+            // timer/minimap overwrite the road's vectors underneath the separately composited translucent HUD.
+            int clean = own && F.hl_okp && (!use_h || F.hp_okp);
+            const Img *previous = clean ? (use_h ? &F.hhlp : &F.hlp) : &F.pic[prev];
+            const Img *current = clean ? H : &F.pic[cur];
+            int reset = !F.of_last_frame || F.of_last_frame + 1 != fgin.frame || clean != F.of_hudless;
+            F.of_active = vk_of_prepare(xc, previous->view, current->view, (uint32_t)cw, (uint32_t)ch,
+                                        reset, &F.of_result);
+            if (F.of_active) F.of_last_frame = fgin.frame, F.of_hudless = clean;
+        }
         VkTmpPic outs[VK_FG_MAX - 1];
         for (int k = 0; k < VK_FG_MAX - 1; k++)
             outs[k] = (VkTmpPic){M[k].img, M[k].view, pf, (uint32_t)cw, (uint32_t)ch};
@@ -683,8 +689,12 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             VkTmpFgInputs in;
             if (have_fgin || vk_tmp_fg_inputs(vk_fg_game_frame, &in)) {
                 if (have_fgin) in = fgin;
+                static int of_jitter = -1;
+                if (of_jitter < 0) of_jitter = rt_knob("FG_NVOF_JITTER", "1");
                 if (F.of_active && of_motion_pass(cb, F.of_result.vectors, F.of_result.wblocks, F.of_result.hblocks,
-                                                  F.of_result.grid, &F.fsr_mv, in.w, in.h, (uint32_t)cw, (uint32_t)ch)) {
+                                                  F.of_result.grid, &F.fsr_mv, in.w, in.h, (uint32_t)cw, (uint32_t)ch,
+                                                  RT_KNOB_ON(of_jitter) ? in.jx : 0.f,
+                                                  RT_KNOB_ON(of_jitter) ? in.jy : 0.f)) {
                     in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
                     static int told;
                     if (!told++) rt_log("vk: FSR motion from hardware optical flow, %ux%u cells of %u pixels",
@@ -827,7 +837,7 @@ static struct {
     VkBuffer buf;
     VmaAllocation alloc;
     void *map;
-    VkDeviceSize size;
+    VkDeviceSize size, stride;
     int n[DUMP_N], hl[DUMP_N], ref[DUMP_N], depth[DUMP_N], w, h;
     float near_[DUMP_N], far_[DUMP_N];
     int nv[DUMP_N];
@@ -840,13 +850,13 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
         const char *e = cfg_get("MKW_FG_DUMP");
         D.at = e && atoll(e) > 0 ? (uint64_t)atoll(e) : UINT64_MAX;
     }
-    VkDeviceSize part = (VkDeviceSize)w * h * 20;
+    VkDeviceSize part = (VkDeviceSize)w * h * 20 + 64;   // fifth plane includes sparse depth and full-grid raw flow
     if (F.frames < D.at || F.frames >= D.at + DUMP_N || (D.buf && (D.w != w || D.h != h))) return 0;
     if (vk_fg_out_format != VK_FORMAT_R8G8B8A8_UNORM && vk_fg_out_format != VK_FORMAT_A2B10G10R10_UNORM_PACK32) return 0;
     D.fmt = vk_fg_out_format;
     VkCtx *c = vk_ctx();
     if (!D.buf) {
-        D.size = part * DUMP_N, D.w = w, D.h = h;
+        D.size = part * DUMP_N, D.stride = part, D.w = w, D.h = h;
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = D.size,
                                  .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
@@ -885,7 +895,7 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
         vkCmdCopyImageToBuffer(cb, in.depth, VK_IMAGE_LAYOUT_GENERAL, D.buf, 9, samples);
     }
     VkDeviceSize nv_bytes = (VkDeviceSize)F.of_result.wblocks * F.of_result.hblocks * 4;
-    D.nv[k] = F.of_active && 64 + nv_bytes <= (VkDeviceSize)w * h * 4;
+    D.nv[k] = F.of_active && nv_bytes <= (VkDeviceSize)w * h * 4;
     if (D.nv[k]) {
         D.grid[k][0] = F.of_result.wblocks, D.grid[k][1] = F.of_result.hblocks, D.grid[k][2] = F.of_result.grid;
         VkBufferCopy copy = {.srcOffset = 0, .dstOffset = base + (VkDeviceSize)w * h * 16 + 64, .size = nv_bytes};
@@ -911,16 +921,16 @@ static void dump_write(VkFence fence) {
             if (!D.n[f] || (k == 1 && D.n[f] < 2) || (k == 2 && !D.hl[f]) || (k == 3 && !D.ref[f])) continue;
             snprintf(path, sizeof path, "%s/%c%llu.png", dir, "gmhr"[k], (unsigned long long)(D.at + (uint64_t)f));
             if (D.fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {   // 10 bits a channel to 8, in place
-                uint32_t *q = (uint32_t *)((uint8_t *)D.map + px * 5 * (size_t)f + px * (size_t)k);
+                uint32_t *q = (uint32_t *)((uint8_t *)D.map + (size_t)D.stride * f + px * (size_t)k);
                 for (size_t i = 0; i < (size_t)D.w * D.h; i++) {
                     uint32_t v = q[i];
                     q[i] = (v >> 2 & 0xff) | (v >> 12 & 0xff) << 8 | (v >> 22 & 0xff) << 16 | 0xffu << 24;
                 }
             }
-            rt_write_png(path, (const uint8_t *)D.map + px * 5 * (size_t)f + px * (size_t)k, (uint32_t)D.w, (uint32_t)D.h);
+            rt_write_png(path, (const uint8_t *)D.map + (size_t)D.stride * f + px * (size_t)k, (uint32_t)D.w, (uint32_t)D.h);
         }
     for (int f = 0; f < DUMP_N; f++) if (D.depth[f]) {
-        const float *z = (const float *)((const uint8_t *)D.map + px * 5 * (size_t)f + px * 4);
+        const float *z = (const float *)((const uint8_t *)D.map + (size_t)D.stride * f + px * 4);
         rt_log("fg depth: frame %llu near %.8g far %.8g, samples %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g",
                (unsigned long long)(D.at + f), D.near_[f], D.far_[f], z[0],z[1],z[2],z[3],z[4],z[5],z[6],z[7],z[8]);
     }
@@ -929,7 +939,7 @@ static void dump_write(VkFence fence) {
         FILE *file = fopen(path, "wb");
         if (file) {
             fwrite(D.grid[f], sizeof(uint32_t), 3, file);
-            fwrite((const uint8_t *)D.map + px * 5 * (size_t)f + px * 4 + 64, 4,
+            fwrite((const uint8_t *)D.map + (size_t)D.stride * f + px * 4 + 64, 4,
                    (size_t)D.grid[f][0] * D.grid[f][1], file);
             fclose(file);
         }

@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "host.h"
+#include "cfg.h"
 #include "of_luma_spv.h"
 #include "vk_oflow.h"
 
@@ -288,7 +289,13 @@ int vk_of_init(VkQueue of_queue, uint32_t of_family) {
         rt_log("vk: hardware optical flow off: SFIXED5 cannot be copied from optical-flow output to storage");
         return 0;
     }
-    if (O.output_grids & VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV)
+    const char *requested_grid = cfg_get("MKW_FG_NVOF_GRID");
+    unsigned requested = requested_grid ? (unsigned)strtoul(requested_grid, NULL, 10) : 4u;
+    VkOpticalFlowGridSizeFlagsNV requested_bit = requested == 1 ? VK_OPTICAL_FLOW_GRID_SIZE_1X1_BIT_NV
+        : requested == 2 ? VK_OPTICAL_FLOW_GRID_SIZE_2X2_BIT_NV : VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV;
+    if ((requested == 1 || requested == 2 || requested == 4) && (O.output_grids & requested_bit))
+        O.grid = requested, O.grid_bit = requested_bit;
+    else if (O.output_grids & VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV)
         O.grid = 4, O.grid_bit = VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV;
     else if (O.output_grids & VK_OPTICAL_FLOW_GRID_SIZE_2X2_BIT_NV)
         O.grid = 2, O.grid_bit = VK_OPTICAL_FLOW_GRID_SIZE_2X2_BIT_NV;
