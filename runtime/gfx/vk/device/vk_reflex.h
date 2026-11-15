@@ -69,6 +69,9 @@ void vk_reflex_marker(VkReflex *reflex, VkReflexSwapchain *swapchain, VkLatencyM
 int vk_reflex_chain_submission(VkReflex *reflex, uint64_t app_frame_id, VkLatencySubmissionPresentIdNV *storage,
                                const void **p_next);
 
+// The lock of whoever acquires and presents on the swapchain: every call that names it holds it (external sync)
+void vk_reflex_set_external_lock(void (*lock)(void), void (*unlock)(void));
+
 #ifdef __cplusplus
 }
 #endif

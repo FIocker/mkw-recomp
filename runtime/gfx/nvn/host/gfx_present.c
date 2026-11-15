@@ -270,6 +270,10 @@ static VkPresentModeKHR pick_present_mode(VkPhysicalDevice pd) {
 
 const char *gfx_window_present_mode(void) { return __atomic_load_n(&g_present_got, __ATOMIC_ACQUIRE); }
 
+// The swapchain's lock for the Reflex calls that name it (vk_latency.c): acquire and present hold it
+void gfx_swapchain_lock(void) { plat_rmutex_lock(&g_pl); }
+void gfx_swapchain_unlock(void) { plat_rmutex_unlock(&g_pl); }
+
 // Queues the oldest present a blit left waiting (g_pl held).
 static void flip_one_locked_id(uint64_t present_id) {
     if (!g_flip_n) return;

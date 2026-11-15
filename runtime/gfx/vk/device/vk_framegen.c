@@ -76,6 +76,13 @@ static struct {
     // pacing (the present thread)
     uint64_t last_at, interval, frames, made_total;
     int logged_mult, auto_m;   // auto_m: MKW_FRAMEGEN=auto's factor now (mult_now)
+    // the GPU time of each slot's command buffer (two timestamps), read when the slot comes round again: the made
+    // frames are flipped on the CPU's schedule, so a generation longer than a step shows them late
+    VkQueryPool qp;
+    double ts_ns;              // nanoseconds per timestamp tick
+    int q_used[SLOTS];
+    double gpu_sum, gpu_max;
+    unsigned gpu_n, gpu_over;  // over: longer than the step between the shown frames
 } F;
 
 static VkPipeline make_pipeline(VkCtx *c, VkPipelineLayout layout, const uint32_t *code, size_t size, const int *spec,
@@ -180,6 +187,15 @@ static int init(VkCtx *c) {
                                       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = SLOTS};
     VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     if (vkAllocateCommandBuffers(c->device, &ai, F.cb) != VK_SUCCESS) return 0;
+    {
+        VkPhysicalDeviceProperties pp;
+        vkGetPhysicalDeviceProperties(c->phys, &pp);
+        F.ts_ns = pp.limits.timestampPeriod;
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                                    .queryCount = 2 * SLOTS};
+        if (!pp.limits.timestampComputeAndGraphics || vkCreateQueryPool(c->device, &qi, NULL, &F.qp) != VK_SUCCESS)
+            F.qp = VK_NULL_HANDLE;
+    }
     for (int i = 0; i < SLOTS; i++)
         if (vkCreateFence(c->device, &fi, NULL, &F.fence[i]) != VK_SUCCESS) return 0;
     F.lambda = knob("MKW_FG_LAMBDA", 0.0001f);
@@ -602,11 +618,27 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
         return 0;
     }
     VkCommandBuffer cb = F.cb[slot];
+    if (F.qp && F.q_used[slot]) {   // the last use of this slot: its fence was waited for above
+        uint64_t t[2];
+        if (vkGetQueryPoolResults(c->device, F.qp, 2 * slot, 2, sizeof t, t, sizeof t[0], VK_QUERY_RESULT_64_BIT) ==
+            VK_SUCCESS && t[1] > t[0]) {
+            double ms = (double)(t[1] - t[0]) * F.ts_ns / 1e6;
+            F.gpu_sum += ms, F.gpu_n++;
+            if (ms > F.gpu_max) F.gpu_max = ms;
+            if (F.interval && m > 1 && ms * 1e6 > (double)F.interval / m) F.gpu_over++;
+        }
+        F.q_used[slot] = 0;
+    }
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vkBeginCommandBuffer(cb, &bi);
+    if (F.qp) {
+        vkCmdResetQueryPool(cb, F.qp, 2 * slot, 2);
+        vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, F.qp, 2 * slot);
+    }
     int n = vk_fg_record(cb, src, sw, sh, crop, m - 1, out, w, h);
+    if (F.qp) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, F.qp, 2 * slot + 1), F.q_used[slot] = n > 0;
     int dump = n && dump_record(cb, out, n, *w, *h);
     vkEndCommandBuffer(cb);
     if (!n) return 0;   // (recorded nothing the GPU must run: the command buffer is reset next time)
@@ -624,10 +656,13 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
     if (dump) dump_write(F.fence[slot], n, *w, *h);
     *step = F.interval / (uint64_t)n;
     F.frames++, F.made_total += (uint64_t)(n - 1);
-    if (m != F.logged_mult || F.frames % 1800 == 0) {   // ~1 min at 30 fps
+    if (m != F.logged_mult || F.frames % (cfg_get("MKW_FG_LOG_EVERY") && atoll(cfg_get("MKW_FG_LOG_EVERY")) > 0 ? (uint64_t)atoll(cfg_get("MKW_FG_LOG_EVERY")) : 1800) == 0) {   // ~1 min at 30 fps
         F.logged_mult = m;
-        rt_log("vk: frame generation %dx: game frame every %.1f ms, %llu frames made over %llu game frames", m,
-               F.interval / 1e6, (unsigned long long)F.made_total, (unsigned long long)F.frames);
+        rt_log("vk: frame generation %dx: game frame every %.1f ms, %llu frames made over %llu game frames; GPU per game "
+               "frame %.2f ms mean, %.2f max, %u longer than a step (%.1f ms)", m, F.interval / 1e6,
+               (unsigned long long)F.made_total, (unsigned long long)F.frames, F.gpu_n ? F.gpu_sum / F.gpu_n : 0.0,
+               F.gpu_max, F.gpu_over, m ? F.interval / 1e6 / m : 0.0);
+        F.gpu_sum = F.gpu_max = 0, F.gpu_n = F.gpu_over = 0;
     }
     return n;
 }
@@ -649,6 +684,7 @@ void vk_fg_release(void) {
         if (ps[i]) vkDestroyPipeline(c->device, ps[i], NULL);
     for (int i = 0; i < SLOTS; i++)
         if (F.fence[i]) vkDestroyFence(c->device, F.fence[i], NULL);
+    if (F.qp) vkDestroyQueryPool(c->device, F.qp, NULL);
     if (F.pool) vkDestroyCommandPool(c->device, F.pool, NULL);
     if (F.sampler) vkDestroySampler(c->device, F.sampler, NULL);
     if (F.fsr_layout) vkDestroyPipelineLayout(c->device, F.fsr_layout, NULL);

@@ -328,7 +328,12 @@ typedef struct {
     int min_level;
     _Bool other_sinks_off;
 } NgxCommonInfo;
+// The NVIDIA App's DLSS Frame Generation override: NGX then loads the App's model, whose made frames come out as an
+// even blend of the two game frames (docs/upscaling.md). NGX says so in its log, which is always listened to (no files).
+static volatile int ngx_fg_override, ngx_log_print;
 static void ngx_log(const char *msg, int level, int feature) {
+    if (strstr(msg, "Feature dlssg override enabled")) ngx_fg_override = 1;
+    if (!ngx_log_print) return;
     size_t n = strlen(msg);
     while (n && (msg[n - 1] == '\n' || msg[n - 1] == '\r')) n--;
     rt_log("ngx[%d/%d]: %.*s", feature, level, (int)n, msg);
@@ -344,9 +349,10 @@ static void ngx_init(void) {
     const VkCtx *c = vk_ctx();
     static NgxCommonInfo ci;
     const char *lg = cfg_get("MKW_NGX_LOG");
-    if (lg && atoi(lg) > 0) ci.log = ngx_log, ci.min_level = atoi(lg) > 1 ? 2 : 1;
+    ci.log = ngx_log, ci.min_level = 1, ci.other_sinks_off = 1;
+    if (lg && atoi(lg) > 0) ngx_log_print = 1, ci.min_level = atoi(lg) > 1 ? 2 : 1, ci.other_sinks_off = 0;
     NgxResult r = N.init(NGX_APP_ID, wdir, c->instance, c->phys, c->device, vkGetInstanceProcAddr, vkGetDeviceProcAddr,
-                         NGX_VERSION_API, ci.log ? &ci : NULL);
+                         NGX_VERSION_API, &ci);
     if (!NGX_OK(r)) {
         rt_log("temporal: NGX init failed (%08x): DLSS unavailable", (unsigned)r);
         return;
@@ -1366,6 +1372,9 @@ int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const V
             if (vmaCreateBuffer(c->vma, &bi, &ai, &G.db[i], &G.dm[i], &info) == VK_SUCCESS) G.dmap[i] = info.pMappedData;
             else G.db[i] = VK_NULL_HANDLE;
         }
+        if (ngx_fg_override)
+            rt_log("temporal: DLSS Frame Generation: the NVIDIA App's DLSS Frame Generation override is on; its model "
+                   "only blends the two frames here: turn the override off in the NVIDIA App (Graphics, DLSS Override)");
         rt_log("temporal: DLSS Frame Generation at %ux%u (format %d), depth and motion %ux%u, up to %d generated",
                bb->w, bb->h, (int)bb->fmt, in.w, in.h, N.fg_max);
     }
@@ -1415,7 +1424,9 @@ int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const V
         G.dmap[bs][0] = 0;
         rd.r.buf.buffer = G.db[bs], rd.r.buf.bytes = 256, rd.type = 1, rd.rw = 1;
     }
-    p_setp(p, "DLSSG.OutputDisableInterpolation", G.db[bs] ? &rd : NULL);
+    // the buffer goes only with MKW_DLSSG_DISABLE_BUF=1 (checking): DLSS-G writes it by its device address, which a buffer
+    // without SHADER_DEVICE_ADDRESS usage does not have (suspected of "device fault: write invalid at 0")
+    p_setp(p, "DLSSG.OutputDisableInterpolation", G.db[bs] && cfg_get("MKW_DLSSG_DISABLE_BUF") ? &rd : NULL);
     static const float ident[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     p_setp(p, "DLSSG.CameraViewToClip", v2c);
     p_setp(p, "DLSSG.ClipToCameraView", c2v);

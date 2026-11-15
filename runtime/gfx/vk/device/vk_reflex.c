@@ -52,6 +52,13 @@ struct VkReflex {
     volatile int32_t detach_error_logged;
 };
 
+// The swapchain's owner's lock (gfx_present.c: acquire and present hold it): the driver calls that name the swapchain
+// take it first, before entry_acquire, so a detach (made under it) never waits for a call that waits for it
+static void (*ext_lock)(void), (*ext_unlock)(void);
+void vk_reflex_set_external_lock(void (*lock)(void), void (*unlock)(void)) { ext_lock = lock, ext_unlock = unlock; }
+static void xlock(void) { if (ext_lock) ext_lock(); }
+static void xunlock(void) { if (ext_unlock) ext_unlock(); }
+
 static int entry_acquire(VkReflex *reflex, VkReflexSwapchain *swapchain, int sleep, VkReflexMode *mode) {
     if (!reflex || !swapchain) return VK_REFLEX_INACTIVE;
     plat_mutex_lock(&reflex->lock);
@@ -213,7 +220,8 @@ VkResult vk_reflex_set_mode(VkReflex *reflex, VkReflexSwapchain *swapchain, VkRe
     if (!vk_reflex_available(reflex)) return VK_ERROR_FEATURE_NOT_PRESENT;
     if (mode != VK_REFLEX_OFF && mode != VK_REFLEX_ON && mode != VK_REFLEX_BOOST)
         return VK_ERROR_INITIALIZATION_FAILED;
-    if (entry_acquire(reflex, swapchain, 0, NULL) != VK_REFLEX_ACQUIRED) return VK_ERROR_FEATURE_NOT_PRESENT;
+    xlock();
+    if (entry_acquire(reflex, swapchain, 0, NULL) != VK_REFLEX_ACQUIRED) return xunlock(), VK_ERROR_FEATURE_NOT_PRESENT;
 
     VkLatencySleepModeInfoNV info = {
         .sType = VK_STRUCTURE_TYPE_LATENCY_SLEEP_MODE_INFO_NV,
@@ -230,17 +238,20 @@ VkResult vk_reflex_set_mode(VkReflex *reflex, VkReflexSwapchain *swapchain, VkRe
         rt_log("vk: Reflex could not set mode %d (%d)", (int)mode, (int)r);
     }
     entry_release(reflex, swapchain, 0);
+    xunlock();
     return r;
 }
 
 VkReflexSleepResult vk_reflex_sleep(VkReflex *reflex, VkReflexSwapchain *swapchain) {
     if (!vk_reflex_available(reflex)) return VK_REFLEX_SLEEP_UNAVAILABLE;
     VkReflexMode mode = VK_REFLEX_OFF;
+    xlock();
     int acq = entry_acquire(reflex, swapchain, 1, &mode);
-    if (acq == VK_REFLEX_BUSY) return VK_REFLEX_SLEEP_BUSY;
-    if (acq != VK_REFLEX_ACQUIRED) return VK_REFLEX_SLEEP_UNAVAILABLE;
+    if (acq == VK_REFLEX_BUSY) return xunlock(), VK_REFLEX_SLEEP_BUSY;
+    if (acq != VK_REFLEX_ACQUIRED) return xunlock(), VK_REFLEX_SLEEP_UNAVAILABLE;
     if (mode == VK_REFLEX_OFF) {
         entry_release(reflex, swapchain, 1);
+        xunlock();
         return VK_REFLEX_SLEEP_OK;
     }
 
@@ -250,6 +261,7 @@ VkReflexSleepResult vk_reflex_sleep(VkReflex *reflex, VkReflexSwapchain *swapcha
                                   .value = value};
     swapchain->sleep_signal_pending = 1;
     VkResult r = reflex->latency_sleep(reflex->device, swapchain->swapchain, &sleep);
+    xunlock();   // the wait below names no swapchain
     if (r != VK_SUCCESS) {
         if (plat_xchg32(&reflex->sleep_error_logged, 1) == 0) {
             rt_log("vk: Reflex sleep request failed (%d); input continues", (int)r);
@@ -286,12 +298,14 @@ VkReflexSleepResult vk_reflex_sleep(VkReflex *reflex, VkReflexSwapchain *swapcha
 void vk_reflex_marker(VkReflex *reflex, VkReflexSwapchain *swapchain, VkLatencyMarkerNV marker,
                       uint64_t app_frame_id) {
     if (!app_frame_id || !vk_reflex_available(reflex)) return;
-    if (entry_acquire(reflex, swapchain, 0, NULL) != VK_REFLEX_ACQUIRED) return;
+    xlock();
+    if (entry_acquire(reflex, swapchain, 0, NULL) != VK_REFLEX_ACQUIRED) return xunlock();
     VkSetLatencyMarkerInfoNV info = {.sType = VK_STRUCTURE_TYPE_SET_LATENCY_MARKER_INFO_NV,
                                      .presentID = app_frame_id,
                                      .marker = marker};
     reflex->marker(reflex->device, swapchain->swapchain, &info);
     entry_release(reflex, swapchain, 0);
+    xunlock();
 }
 
 int vk_reflex_chain_submission(VkReflex *reflex, uint64_t app_frame_id, VkLatencySubmissionPresentIdNV *storage,

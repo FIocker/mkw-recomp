@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "gfx.h"
 #include "platform/platform.h"
 #include "host.h"
 #include "vk.h"
@@ -40,6 +41,7 @@ void vk_lat_init(uint32_t spec_version) {
         return;
     }
     L.r = vk_reflex_create(c->device, spec_version);
+    vk_reflex_set_external_lock(gfx_swapchain_lock, gfx_swapchain_unlock);
     rt_log("reflex: VK_NV_low_latency2 revision %u %s", spec_version, L.r ? "ready" : "could not be set up");
 }
 
@@ -92,10 +94,12 @@ void vk_lat_frame_start(uint64_t id) {
     unsigned v = cfg_version();
     if (v != L.cfg_seen) {
         L.cfg_seen = v;
+        gfx_swapchain_lock();   // before lk, as create_swapchain (gfx_present.c) takes them
         plat_mutex_lock(&lk);
         L.want = cfg_mode();
         apply_mode_locked();
         plat_mutex_unlock(&lk);
+        gfx_swapchain_unlock();
     }
     L.sim_id = id;
     if (!on()) return;
