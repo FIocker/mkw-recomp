@@ -11,6 +11,7 @@
 //     --probe-astc      the compute ASTC decoder against astc_decode_ldr; needs no game files
 //     --probe-framegen  frame generation's passes on two pictures (MKW_FG_PROBE=DIR); needs no game files
 //     --probe-oflow     hardware optical flow against a known synthetic translation; MKW_FG_NVOF=1
+//     --probe-fsr-fg    real FSR generation on analytical geometry and shading motion, without game assets
 
 //     --boot            run the game to the first NVN call
 //     --seconds S       run the game (implies --boot's start-up) until the world clock (game time since the loaded
@@ -655,6 +656,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-astc")) return probe_astc();
     if (!strcmp(mode, "--probe-framegen")) return probe_framegen();
     if (!strcmp(mode, "--probe-oflow")) return probe_oflow();
+    if (!strcmp(mode, "--probe-fsr-fg")) return probe_fsr_fg();
     if (!strcmp(mode, "--probe-vkdevice")) return probe_vkdevice();
 
     if (!strcmp(mode, "--probe-texpre")) return probe_texpre();

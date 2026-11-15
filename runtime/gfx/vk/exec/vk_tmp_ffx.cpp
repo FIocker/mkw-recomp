@@ -212,7 +212,8 @@ extern "C" int vk_tmp_ffx_upscale(VkCommandBuffer cb, const VkTmpRes *color, con
     d.cameraNear = znear;
     d.cameraFar = zfar;
     d.cameraFovAngleVertical = fov_y;
-    d.viewSpaceToMetersFactor = 0.01f;   // MKW's world is in centimetres (a kart is ~150 units long)
+    // Same metre-scale camera/depth units as frame generation below (Mario's body spans about 1.74 units).
+    d.viewSpaceToMetersFactor = 1.0f;
     d.flags = hdr ? 0 : FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
     ffxReturnCode_t r = A.dispatch(&U.c[U.cur].ctx, &d.header);
     if (r != FFX_API_RETURN_OK) {

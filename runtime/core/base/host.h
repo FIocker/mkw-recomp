@@ -345,5 +345,6 @@ int probe_vkmem(void), probe_vkexec(void), probe_astc(void);                 // 
 int probe_texpre(void);                                    // texpre_probe.c: GPU BC7 against bc7enc on game textures
 int probe_framegen(void);                                  // fg_probe.c: frame generation on two pictures
 int probe_oflow(void);                                     // oflow_probe.c: hardware flow with a known translation
+int probe_fsr_fg(void);                                    // fsr_fg_probe.c: analytical geometry/shading motion
 
 int vk_texpre_encode(void);                                  // vk_texpre.c: --texpre (BC7 of the recorded ASTC textures)
