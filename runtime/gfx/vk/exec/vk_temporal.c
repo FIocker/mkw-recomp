@@ -877,8 +877,10 @@ void vk_tmp_hl_seen(VkImage image) {   // VK_NULL_HANDLE: a draw starts
 int vk_tmp_hl_redo(void) { return hl_redo; }
 
 static int hl_wanted(void) {
-    const char *e = cfg_get("MKW_FG_HUDLESS");   // MKW_FG_HUDLESS=0: frame generation sees the HUD (to compare)
-    return vk_fg_wanted() && !(e && !strcmp(e, "0"));
+    // MKW_FG_HUDLESS=0: frame generation sees the HUD (to compare); =ab switches it with the MKW_AB blocks
+    static int mode = -1;
+    if (mode < 0) mode = rt_knob("FG_HUDLESS", "1");
+    return vk_fg_wanted() && RT_KNOB_ON(mode);
 }
 
 static void hl_out_free(void *arg) {   // completion thread

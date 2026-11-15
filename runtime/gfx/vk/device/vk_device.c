@@ -405,10 +405,24 @@ static int create_device(void) {
                has_fbl && c->fbl.attachmentFeedbackLoopLayout, has_lr && c->lr.dynamicRenderingLocalRead);
     }
 
-    float prio = 1.0f;
+    float prio = 1.0f, prios[2] = {1.0f, 1.0f};
+    // Frame generation's work (its copies aside), its blits and its presents go to a second queue of the graphics
+    // family (vk_framegen.c): on the game's queue each game submission waited behind the last frame's generation
+    // (1.8-2.4 ms of GPU at 4K), and the game's fence waits pushed 4 % of its frames past 20 ms (ab-flip0, 15/11/2026).
+    // NX2navi makes queues of its own for its frame generation the same way. MKW_FG_QUEUE=0: one queue.
+    uint32_t gq = 1;
+    {
+        uint32_t nf = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nf, NULL);
+        VkQueueFamilyProperties qp[16];
+        if (nf > 16) nf = 16;
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nf, qp);
+        const char *e = cfg_get("MKW_FG_QUEUE");
+        if (g_vk.gfx_family < nf && qp[g_vk.gfx_family].queueCount >= 2 && !(e && !strcmp(e, "0"))) gq = 2;
+    }
     VkDeviceQueueCreateInfo qi[2] = {
-        {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family, .queueCount = 1,
-         .pQueuePriorities = &prio}};
+        {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.gfx_family, .queueCount = gq,
+         .pQueuePriorities = prios}};
     uint32_t nqi = 1;
     if (g_vk.xfer_family != g_vk.gfx_family) {
         qi[1] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -422,6 +436,9 @@ static int create_device(void) {
     free(c);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateDevice failed (%d)", (int)r); return 0; }
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
+    g_vk.fg_queue = g_vk.gfx_queue;
+    if (gq == 2) vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 1, &g_vk.fg_queue);
+    rt_log("vk: frame generation's queue: %s", gq == 2 ? "the graphics family's second" : "the game's (one queue)");
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }
 

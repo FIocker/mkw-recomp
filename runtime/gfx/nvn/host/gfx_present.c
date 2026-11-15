@@ -126,7 +126,9 @@ static int g_cap_w, g_cap_h, g_cap_valid;
 // The swapchain images whose blit was submitted and whose present waits, oldest first: vk_present_flip presents the
 // oldest. More than one only with frame generation (vk_present_blit_ahead).
 static uint32_t g_flip_q[MAX_IMAGES];
+static VkQueue g_flip_on[MAX_IMAGES];   // the queue each waiting present's blit went to: it is presented there
 static int g_flip_n;
+static VkQueue g_blit_q;   // vk_present_queue: the queue the next blits go to (frame generation's), 0 the game's
 static float g_aspect;           // gfx_aspect_set: the ultrawide output's aspect (MKW_ASPECT), 0 at 16:9
 void gfx_aspect_set(float a) { g_aspect = a; }
 static int g_frames = 2;         // slots in use (create_swapchain): 2, FRAMES with frame generation
@@ -278,8 +280,10 @@ void gfx_swapchain_unlock(void) { plat_rmutex_unlock(&g_pl); }
 static void flip_one_locked_id(uint64_t present_id) {
     if (!g_flip_n) return;
     uint32_t idx = g_flip_q[0];
+    VkQueue q = g_flip_on[0] ? g_flip_on[0] : vk_ctx()->gfx_queue;
     g_flip_n--;
     memmove(g_flip_q, g_flip_q + 1, (size_t)g_flip_n * sizeof *g_flip_q);
+    memmove(g_flip_on, g_flip_on + 1, (size_t)g_flip_n * sizeof *g_flip_on);
     if (!g_sc) return;
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
                            .pWaitSemaphores = &g_render_done[idx], .swapchainCount = 1, .pSwapchains = &g_sc,
@@ -288,7 +292,7 @@ static void flip_one_locked_id(uint64_t present_id) {
     if (present_id && vk_ctx()->has_present_id) pi.pNext = &pid;   // Reflex (vk_latency.c)
     vk_queue_lock();
     uint64_t begin = (rt_trace & RT_TRACE_PRESENT) ? kern_now_ns() : 0;
-    VkResult r = vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
+    VkResult r = vkQueuePresentKHR(q, &pi);
     uint64_t end = begin ? kern_now_ns() : 0;
     vk_queue_unlock();
     // The source-group trace in vk_backend.c cannot reveal uneven spacing between generated frames. These are host
@@ -778,10 +782,12 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = 1, .pWaitSemaphoreInfos = &wait,
                         .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbi, .signalSemaphoreInfoCount = 1,
                         .pSignalSemaphoreInfos = &sig};
+    VkQueue bq = g_blit_q ? g_blit_q : c->gfx_queue;
     vk_queue_lock();
-    r = vkQueueSubmit2(c->gfx_queue, 1, &si, g_fence[slot]);
+    r = vkQueueSubmit2(bq, 1, &si, g_fence[slot]);
     vk_queue_unlock();
     if (r == VK_SUCCESS) {
+        g_flip_on[g_flip_n] = bq;
         g_flip_q[g_flip_n++] = idx;   // (at most g_ahead: flushed above)
         if (!defer) flip_locked();
     } else {
@@ -792,7 +798,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         VkSubmitInfo2 empty = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = 1,
                                .pWaitSemaphoreInfos = &wait};
         vk_queue_lock();
-        VkResult re = vkQueueSubmit2(c->gfx_queue, 1, &empty, g_fence[slot]);
+        VkResult re = vkQueueSubmit2(bq, 1, &empty, g_fence[slot]);
         vk_queue_unlock();
         if (re != VK_SUCCESS) rt_log("gfx: the empty batch after it failed too (%d)", (int)re);
         plat_xchg32(&g_dirty, 1);
@@ -831,6 +837,10 @@ void vk_present_blit_ahead(VkImage src, VkImageLayout layout, VkFormat fmt, int 
 }
 
 int vk_present_ahead_max(void) { return __atomic_load_n(&g_ahead, __ATOMIC_RELAXED); }
+
+// The queue of the blits that follow (the present thread; VK_NULL_HANDLE: the game's). Frame generation's blits read
+// only its own images, written on its queue: they go there, and their presents too, behind no game work.
+void vk_present_queue(VkQueue q) { g_blit_q = q; }
 
 void vk_present_flip(void) {
     plat_rmutex_lock(&g_pl);

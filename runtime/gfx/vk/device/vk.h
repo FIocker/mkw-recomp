@@ -25,6 +25,8 @@ typedef struct VkCtx {
     uint32_t xfer_family;                   // a transfer-only family when the GPU has one, else gfx_family
     VkQueue gfx_queue;                      // graphics + present
     VkQueue xfer_queue;                     // equals gfx_queue when xfer_shared
+    VkQueue fg_queue;                       // frame generation's (vk_framegen.c): the graphics family's second queue,
+                                            // else gfx_queue; submitted to under vk_queue_lock as well
     int xfer_shared;                        // 1: no separate queue; serialise with gfx_queue
     VmaAllocator vma;
     VkSemaphore timeline;                   // one timeline semaphore; values are issued by vk_sync.c
@@ -118,6 +120,8 @@ double vk_present_refresh_hz(void);   // the window's monitor, 0 unknown
 #define VK_FG_MAX 4   // frames shown per game frame at most
 extern uint64_t vk_fg_game_frame;   // the game frame the present thread makes frames for (vk_framegen.c)
 extern VkFormat vk_fg_src_format, vk_fg_out_format;   // its picture's format, and the format of the frames handed out
+VkQueue vk_fg_queue(void);   // the queue frame generation's frames are written on (their blits go there), 0: the game's
+void vk_present_queue(VkQueue q);   // gfx_present.c: the queue of the blits that follow (0: the game's)
 int vk_fg_wanted(void);   // MKW_FRAMEGEN is not off: the swapchain keeps spare images for it
 // One game frame: copies the crop rectangle {x, y, w, h} of src (GENERAL, all its writes submitted) into a picture of
 // its own and submits the frames made between the last game frame and it. out: what to show, in order (the made

@@ -56,6 +56,15 @@ static struct {
     VkCommandPool pool;
     VkCommandBuffer cb[SLOTS];
     VkFence fence[SLOTS];
+    // Two queues (VkCtx.fg_queue not the game's): each game frame's copies of its pictures go to the game's queue
+    // (xcb, so the game's next frame cannot write them first) and signal xsem; the generation, the HUD, the dump, and
+    // after them the blits and presents (vk_backend.c) go to fg_queue, which waits for that and signals fsem. The next
+    // copies wait for fsem: they write the images the last frame's generation read (pic, hl, hpic take turns).
+    VkCommandBuffer xcb[SLOTS], rec_x;   // rec_x: where vk_fg_record puts the copies (its cb when 0)
+    VkSemaphore xsem, fsem;
+    uint64_t xval, fval;
+    int split;
+    int luma_ok[2];                      // pic[i]'s luma levels were made (only the optical flow reads them)
     unsigned n;
     // the images, for a w x h picture: the game's last two (rgba8), their luma at full size (lf), quarter size (lq) and
     // a sixteenth (le), the vectors of each level and their medians (coarse, fine, full size) and the made frames
@@ -204,6 +213,14 @@ static int init(VkCtx *c) {
                                       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = SLOTS};
     VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     if (vkAllocateCommandBuffers(c->device, &ai, F.cb) != VK_SUCCESS) return 0;
+    if (c->fg_queue && c->fg_queue != c->gfx_queue && vkAllocateCommandBuffers(c->device, &ai, F.xcb) == VK_SUCCESS) {
+        VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+                                        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE};
+        VkSemaphoreCreateInfo sc = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &st};
+        F.split = vkCreateSemaphore(c->device, &sc, NULL, &F.xsem) == VK_SUCCESS &&
+                  vkCreateSemaphore(c->device, &sc, NULL, &F.fsem) == VK_SUCCESS;
+        rt_log("vk: frame generation on a queue of its own%s", F.split ? "" : ": no semaphores, on the game's");
+    }
     {
         VkPhysicalDeviceProperties pp;
         vkGetPhysicalDeviceProperties(c->phys, &pp);
@@ -450,30 +467,31 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     F.hl_last = 0;
     const int cur = F.cur, prev = cur ^ 1;
     const VkPipelineStageFlags2 ALL = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, XF = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    VkCommandBuffer xc = F.rec_x ? F.rec_x : cb;   // the copies, and the layouts of new images (before them)
+    if (F.fresh) F.luma_ok[0] = F.luma_ok[1] = 0;
     if (F.fresh) {
         Img *all[] = {&F.pic[0], &F.pic[1], &F.lf[0], &F.lf[1], &F.lq[0], &F.lq[1], &F.le[0],   &F.le[1],   &F.fl[0],
                       &F.fl[1],  &F.fl[2],  &F.fl[3], &F.fl[4], &F.fl[5], &F.made[0], &F.made[1], &F.made[2]};
         for (size_t i = 0; i < sizeof all / sizeof *all; i++)
-            img_barrier(cb, all[i]->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
+            img_barrier(xc, all[i]->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
                         VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         F.fresh = 0;
     }
     // earlier reads of our images (the last frame's presents) finish before this frame writes them; the game's writes
     // to its picture become visible to the copy, and its later writes wait for the copy
-    mem_barrier(cb);
-    img_barrier(cb, src, VK_IMAGE_LAYOUT_GENERAL, ALL, VK_ACCESS_2_MEMORY_WRITE_BIT, XF, VK_ACCESS_2_TRANSFER_READ_BIT);
+    mem_barrier(xc);
+    img_barrier(xc, src, VK_IMAGE_LAYOUT_GENERAL, ALL, VK_ACCESS_2_MEMORY_WRITE_BIT, XF, VK_ACCESS_2_TRANSFER_READ_BIT);
     VkImageBlit region = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                           .srcOffsets = {{cx, cy, 0}, {cx + cw, cy + ch, 1}},
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                           .dstOffsets = {{0, 0, 0}, {cw, ch, 1}}};
-    vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, F.pic[cur].img, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
-    img_barrier(cb, src, VK_IMAGE_LAYOUT_GENERAL, XF, 0, ALL, 0);
+    vkCmdBlitImage(xc, src, VK_IMAGE_LAYOUT_GENERAL, F.pic[cur].img, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
+    img_barrier(xc, src, VK_IMAGE_LAYOUT_GENERAL, XF, 0, ALL, 0);
+    mem_barrier(xc);
     mem_barrier(cb);
+    F.luma_ok[cur] = 0;
     const uint32_t qw = ((uint32_t)cw + 3) / 4, qh = ((uint32_t)ch + 3) / 4, gw = grid(cw), gh = grid(ch);
     const int colour[4] = {1, 1, 0, 0}, level[4] = {0, 4, 0, 0};
-    pass(cb, F.luma, &F.pic[cur], NULL, NULL, &F.lf[cur], colour, (uint32_t)cw, (uint32_t)ch);
-    pass(cb, F.luma, &F.lf[cur], NULL, NULL, &F.lq[cur], level, qw, qh);
-    pass(cb, F.luma, &F.lq[cur], NULL, NULL, &F.le[cur], level, gw, gh);
     // DLSS Frame Generation or FSR 3.1 frame generation (MKW_FG_ENGINE, vk_temporal.c) in the place of the optical flow,
     // from the same game frame's depth, motion vectors and camera; the flow below when they cannot
     int eng = !strcmp(cfg_value("MKW_FG_ENGINE"), "dlss") ? 1 : !strcmp(cfg_value("MKW_FG_ENGINE"), "fsr3") ? 2 : 0;
@@ -503,6 +521,16 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     }
     int flow_ready = 0;
     if (made && (eng == 0 || (mv_ready && !zero_mv) || compare_native)) {
+        // The SDK-only path avoids luma work, but FSR's optional object vectors and the readback reference need it
+        // before their flow passes too. Both images may be stale after toggling the motion experiment in-run.
+        for (int i = 0; i < 2; i++) {
+            int k = i ? prev : cur;
+            if (F.luma_ok[k]) continue;
+            pass(cb, F.luma, &F.pic[k], NULL, NULL, &F.lf[k], colour, (uint32_t)cw, (uint32_t)ch);
+            pass(cb, F.luma, &F.lf[k], NULL, NULL, &F.lq[k], level, qw, qh);
+            pass(cb, F.luma, &F.lq[k], NULL, NULL, &F.le[k], level, gw, gh);
+            F.luma_ok[k] = 1;
+        }
         const float pc16[4] = {16, F.lambda, F.bias, 0}, pc4[4] = {4, F.lambda, F.bias, 0}, pc1[4] = {1, F.lambda, F.bias, 0};
         pass(cb, F.coarse, &F.le[prev], &F.le[cur], NULL, &F.fl[0], pc16, (gw + 1) / 2, (gh + 1) / 2);
         pass(cb, F.median, &F.fl[0], NULL, NULL, &F.fl[1], level, (gw + 1) / 2, (gh + 1) / 2);
@@ -531,7 +559,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             F.hw = cw, F.hh = ch, F.hfmt = vk_fg_src_format;
             Img *all[] = {&F.hpic, &F.hmade[0], &F.hmade[1], &F.hmade[2], &F.hhl, &F.hpicp, &F.hhlp};
             for (int i = 0; i < 7; i++)
-                img_barrier(cb, all[i]->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
+                img_barrier(xc, all[i]->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
                             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         } else {
             F.hw = F.hh = 0;
@@ -539,9 +567,9 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     }
     int use_h = hdr && F.hw == cw && F.hh == ch;
     if (made && eng && use_h) {   // the picture again, bit for bit in its own format
-        img_barrier(cb, src, VK_IMAGE_LAYOUT_GENERAL, ALL, VK_ACCESS_2_MEMORY_WRITE_BIT, XF, VK_ACCESS_2_TRANSFER_READ_BIT);
-        vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, F.hpic.img, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
-        mem_barrier(cb);
+        img_barrier(xc, src, VK_IMAGE_LAYOUT_GENERAL, ALL, VK_ACCESS_2_MEMORY_WRITE_BIT, XF, VK_ACCESS_2_TRANSFER_READ_BIT);
+        vkCmdBlitImage(xc, src, VK_IMAGE_LAYOUT_GENERAL, F.hpic.img, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
+        mem_barrier(xc);
     }
     vk_fg_out_format = VK_FORMAT_R8G8B8A8_UNORM;
     if (made && eng) {
@@ -555,15 +583,15 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
         if (H->img && vk_tmp_fg_hudless(vk_fg_game_frame, &hls) && (int)hls.w == sw && (int)hls.h == sh &&
             hls.fmt == vk_fg_src_format) {
             if (!use_h && F.hl_fresh) {
-                img_barrier(cb, F.hl.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
+                img_barrier(xc, F.hl.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
                             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
-                img_barrier(cb, F.hlp.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
+                img_barrier(xc, F.hlp.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
                             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
                 F.hl_fresh = 0;
             }
-            mem_barrier(cb);
-            vkCmdBlitImage(cb, hls.img, VK_IMAGE_LAYOUT_GENERAL, H->img, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
-            mem_barrier(cb);
+            mem_barrier(xc);
+            vkCmdBlitImage(xc, hls.img, VK_IMAGE_LAYOUT_GENERAL, H->img, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
+            mem_barrier(xc);
             hl = (VkTmpPic){H->img, H->view, pf, (uint32_t)cw, (uint32_t)ch};
             hlp = &hl;
             F.hl_given++;
@@ -637,6 +665,15 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             return made + 1;
         }
     }
+    // the luma levels the flow searches: this frame's, and the last frame's when it went to an engine (none made then)
+    for (int i = 0; i < 2 && (made || !eng); i++) {
+        int k = i ? prev : cur;
+        if (F.luma_ok[k] || (i && !made)) continue;
+        pass(cb, F.luma, &F.pic[k], NULL, NULL, &F.lf[k], colour, (uint32_t)cw, (uint32_t)ch);
+        pass(cb, F.luma, &F.lf[k], NULL, NULL, &F.lq[k], level, qw, qh);
+        pass(cb, F.luma, &F.lq[k], NULL, NULL, &F.le[k], level, gw, gh);
+        F.luma_ok[k] = 1;
+    }
     if (made) {
         if (!flow_ready) {
             const float pc16[4] = {16, F.lambda, F.bias, 0}, pc4[4] = {4, F.lambda, F.bias, 0}, pc1[4] = {1, F.lambda, F.bias, 0};
@@ -671,6 +708,10 @@ static int mult_now(void) {
     if (!RT_KNOB_ON(bench)) return 0;
     const char *v = cfg_value("MKW_FRAMEGEN");
     if (!strcmp(v, "off") || turbo_speed() > 1) return 0;
+    // MKW_FG_AB=ab (measuring): frame generation off in the MKW_AB blocks A, on in B, within one race
+    static int ab = -1;
+    if (ab < 0) ab = cfg_get("MKW_FG_AB") && !strcmp(cfg_get("MKW_FG_AB"), "ab");
+    if (ab && !rt_ab()) return 0;
     int m;
     if (!strcmp(v, "auto")) {
         // The refreshes of the monitor that fit in one game frame, rounded down: rounded up a quarter early, a game
@@ -715,6 +756,7 @@ static struct {
     VkDeviceSize size;
     int n[DUMP_N], hl[DUMP_N], ref[DUMP_N], depth[DUMP_N], w, h;
     float near_[DUMP_N], far_[DUMP_N];
+    VkFormat fmt;   // exact presented encoding, including packed HDR10 readback
 } D;
 
 static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int h, VkImage native_ref) {
@@ -724,6 +766,8 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
     }
     VkDeviceSize part = (VkDeviceSize)w * h * 20;
     if (F.frames < D.at || F.frames >= D.at + DUMP_N || (D.buf && (D.w != w || D.h != h))) return 0;
+    if (vk_fg_out_format != VK_FORMAT_R8G8B8A8_UNORM && vk_fg_out_format != VK_FORMAT_A2B10G10R10_UNORM_PACK32) return 0;
+    D.fmt = vk_fg_out_format;
     VkCtx *c = vk_ctx();
     if (!D.buf) {
         D.size = part * DUMP_N, D.w = w, D.h = h;
@@ -738,7 +782,7 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
     int k = (int)(F.frames - D.at);
     VkDeviceSize base = part * (VkDeviceSize)k;
     D.n[k] = n;
-    D.hl[k] = F.hl_last && F.hl_dump && vk_fg_out_format == VK_FORMAT_R8G8B8A8_UNORM;
+    D.hl[k] = F.hl_last && F.hl_dump;
     VkBufferImageCopy bc = {.bufferOffset = base, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                             .imageExtent = {(uint32_t)w, (uint32_t)h, 1}};
     vkCmdCopyImageToBuffer(cb, out[n - 1], VK_IMAGE_LAYOUT_GENERAL, D.buf, 1, &bc);
@@ -783,6 +827,13 @@ static void dump_write(VkFence fence) {
         for (int k = 0; k < 4; k++) {
             if (!D.n[f] || (k == 1 && D.n[f] < 2) || (k == 2 && !D.hl[f]) || (k == 3 && !D.ref[f])) continue;
             snprintf(path, sizeof path, "%s/%c%llu.png", dir, "gmhr"[k], (unsigned long long)(D.at + (uint64_t)f));
+            if (D.fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {   // 10 bits a channel to 8, in place
+                uint32_t *q = (uint32_t *)((uint8_t *)D.map + px * 5 * (size_t)f + px * (size_t)k);
+                for (size_t i = 0; i < (size_t)D.w * D.h; i++) {
+                    uint32_t v = q[i];
+                    q[i] = (v >> 2 & 0xff) | (v >> 12 & 0xff) << 8 | (v >> 22 & 0xff) << 16 | 0xffu << 24;
+                }
+            }
             rt_write_png(path, (const uint8_t *)D.map + px * 5 * (size_t)f + px * (size_t)k, (uint32_t)D.w, (uint32_t)D.h);
         }
     for (int f = 0; f < DUMP_N; f++) if (D.depth[f]) {
@@ -839,7 +890,12 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
         vkCmdResetQueryPool(cb, F.qp, 2 * slot, 2);
         vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, F.qp, 2 * slot);
     }
+    VkCommandBuffer xcb = F.split ? F.xcb[slot] : VK_NULL_HANDLE;
+    if (xcb) vkResetCommandBuffer(xcb, 0), vkBeginCommandBuffer(xcb, &bi);
+    F.rec_x = xcb;
     int n = vk_fg_record(cb, src, sw, sh, crop, m - 1, out, w, h);
+    F.rec_x = VK_NULL_HANDLE;
+    if (xcb) vkEndCommandBuffer(xcb);
     if (F.qp) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, F.qp, 2 * slot + 1), F.q_used[slot] = n > 0;
     int dump = n && dump_record(cb, out, n, *w, *h, F.compare_native);
     vkEndCommandBuffer(cb);
@@ -847,9 +903,32 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
     vkResetFences(c->device, 1, &F.fence[slot]);
     VkCommandBufferSubmitInfo cbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cb};
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbi};
-    vk_queue_lock();
-    VkResult r = vkQueueSubmit2(c->gfx_queue, 1, &si, F.fence[slot]);
-    vk_queue_unlock();
+    VkResult r;
+    if (xcb) {   // the copies on the game's queue after the last generation; the rest on fg_queue after the copies
+        VkCommandBufferSubmitInfo xi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = xcb};
+        VkSemaphoreSubmitInfo xw = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = F.fsem, .value = F.fval,
+                                    .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT},
+                              xs = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = F.xsem,
+                                    .value = F.xval + 1, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT},
+                              fw = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = F.xsem,
+                                    .value = F.xval + 1, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT},
+                              fs = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = F.fsem,
+                                    .value = F.fval + 1, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+        VkSubmitInfo2 xsi = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = F.fval ? 1u : 0u,
+                             .pWaitSemaphoreInfos = &xw, .commandBufferInfoCount = 1, .pCommandBufferInfos = &xi,
+                             .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &xs};
+        si.waitSemaphoreInfoCount = 1, si.pWaitSemaphoreInfos = &fw;
+        si.signalSemaphoreInfoCount = 1, si.pSignalSemaphoreInfos = &fs;
+        vk_queue_lock();
+        r = vkQueueSubmit2(c->gfx_queue, 1, &xsi, VK_NULL_HANDLE);
+        if (r == VK_SUCCESS) F.xval++, r = vkQueueSubmit2(c->fg_queue, 1, &si, F.fence[slot]);
+        if (r == VK_SUCCESS) F.fval++;
+        vk_queue_unlock();
+    } else {
+        vk_queue_lock();
+        r = vkQueueSubmit2(c->gfx_queue, 1, &si, F.fence[slot]);
+        vk_queue_unlock();
+    }
     if (r != VK_SUCCESS) {
         rt_log("vk: frame generation: submit failed (%d)", (int)r);
         F.have_prev = 0;
@@ -873,6 +952,8 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
     return n;
 }
 
+VkQueue vk_fg_queue(void) { return F.split ? vk_ctx()->fg_queue : VK_NULL_HANDLE; }
+
 VkImage vk_fg_flow(int level, int *gw, int *gh) {
     *gw = (int)grid(F.w), *gh = (int)grid(F.h);
     if (level < 2) *gw = (*gw + 1) / 2, *gh = (*gh + 1) / 2;
@@ -891,6 +972,8 @@ void vk_fg_release(void) {
     for (int i = 0; i < SLOTS; i++)
         if (F.fence[i]) vkDestroyFence(c->device, F.fence[i], NULL);
     if (F.qp) vkDestroyQueryPool(c->device, F.qp, NULL);
+    if (F.xsem) vkDestroySemaphore(c->device, F.xsem, NULL);
+    if (F.fsem) vkDestroySemaphore(c->device, F.fsem, NULL);
     if (F.hud) vkDestroyPipeline(c->device, F.hud, NULL);
     if (F.hlayout) vkDestroyPipelineLayout(c->device, F.hlayout, NULL);
     if (F.hdsl) vkDestroyDescriptorSetLayout(c->device, F.hdsl, NULL);
