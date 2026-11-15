@@ -60,6 +60,8 @@ static int finish(VkCtx *c, VkCommandBuffer cb, VkFence fence) {
 int probe_fsr_fg(void) {
     CHECK(vk_init());
     VkCtx *c = vk_ctx();
+    printf("probe-fsr-fg: Vulkan validation active %d\n", c->validation);
+    if (cfg_bool("MKW_VK_VALIDATION")) CHECK(c->validation);
     CHECK(vk_tmp_ffx_load());
     int recording = rec_suspend();
     const char *mode = cfg_get("MKW_FSR_PROBE_MV");

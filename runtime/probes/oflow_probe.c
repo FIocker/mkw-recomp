@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "host.h"
+#include "cfg.h"
 #include "vk.h"
 #include "vk_oflow.h"
 #include "vk_rec.h"
@@ -37,6 +38,8 @@ static uint8_t pattern(int x, int y) {
 int probe_oflow(void) {
     CHECK(vk_init());
     VkCtx *c = vk_ctx();
+    printf("probe-oflow: Vulkan validation active %d\n", c->validation);
+    if (cfg_bool("MKW_VK_VALIDATION")) CHECK(c->validation);
     CHECK(c->has_oflow && c->of_queue);
     CHECK(vk_of_init(c->of_queue, c->of_family));
     int recording = rec_suspend();   // the module pushes descriptors directly, as do temporal SDK calls
