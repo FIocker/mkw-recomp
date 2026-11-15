@@ -287,8 +287,19 @@ static void flip_one_locked_id(uint64_t present_id) {
     VkPresentIdKHR pid = {.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR, .swapchainCount = 1, .pPresentIds = &present_id};
     if (present_id && vk_ctx()->has_present_id) pi.pNext = &pid;   // Reflex (vk_latency.c)
     vk_queue_lock();
+    uint64_t begin = (rt_trace & RT_TRACE_PRESENT) ? kern_now_ns() : 0;
     VkResult r = vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
+    uint64_t end = begin ? kern_now_ns() : 0;
     vk_queue_unlock();
+    // The source-group trace in vk_backend.c cannot reveal uneven spacing between generated frames. These are host
+    // queue-call timestamps, including every generated flip; display/scanout timing still requires a presentation trace.
+    if (begin) {
+        static uint64_t last;
+        rt_log("flip: start_ns %llu interval %.3f ms, queue %.3f ms, id %llu, result %d",
+               (unsigned long long)begin, last ? (double)(begin - last) / 1e6 : 0., (double)(end - begin) / 1e6,
+               (unsigned long long)present_id, (int)r);
+        last = begin;
+    }
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
 }
 static void flip_one_locked(void) { flip_one_locked_id(0); }
