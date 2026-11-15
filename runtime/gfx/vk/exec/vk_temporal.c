@@ -743,15 +743,16 @@ static int res_init(void) {
     R.ok = 0;
     const VkCtx *c = vk_ctx();
     R.push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
-    VkDescriptorSetLayoutBinding b[5] = {
+    VkDescriptorSetLayoutBinding b[6] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
         {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
         {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
-        {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+        {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
     VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                           .bindingCount = 5, .pBindings = b};
+                                           .bindingCount = 6, .pBindings = b};
     VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 128};
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST,
                               .minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
@@ -1194,7 +1195,7 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
     VkImageView zview = game_view(&T.depth, VK_IMAGE_ASPECT_DEPTH_BIT), cview = game_view(color, VK_IMAGE_ASPECT_COLOR_BIT);
     // motion vectors
     {
-        struct { float m[16]; float size[2], pad[2]; float kart[4]; float still[4]; } pc;
+        struct { float m[16]; float size[2], pad[2]; float kart[4]; float still[4]; float zt[4]; } pc;
         for (int r = 0; r < 4; r++)
             for (int c = 0; c < 4; c++) pc.m[c * 4 + r] = (float)m[r * 4 + c];   // column-major for GLSL
         pc.size[0] = (float)w, pc.size[1] = (float)h, pc.pad[0] = pc.pad[1] = 0;
@@ -1210,12 +1211,19 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
         int pv = R.prevc.img && R.prevc.w == w && R.prevc.h == h && R.prevc.fmt == color->format &&
                  R.prevc_frame + 1 == T.frame && !T.reset && !cfg_get("MKW_TEMPORAL_KART_CIRCLE");
         pc.still[0] = pv ? 1.f : 0.f, pc.still[1] = 0.30f, pc.still[2] = 0.32f, pc.still[3] = 0.6f;
+        // the last frame's depth (its R32 copy, kept for frame generation): the still test by depth (tmp_mv.comp)
+        int ps = (slot + FG_SLOTS - 1) % FG_SLOTS;
+        const Own *ZP = &R.zs[ps];
+        int zv = ZP->img && ZP->w == w && ZP->h == h && FS[ps].frame + 1 == T.frame && !T.reset &&
+                 !(cfg_get("MKW_TEMPORAL_KART_DEPTH") && !strcmp(cfg_get("MKW_TEMPORAL_KART_DEPTH"), "0"));
+        pc.zt[0] = zv ? 1.f : 0.f, pc.zt[1] = znear, pc.zt[2] = zfar, pc.zt[3] = 0.f;
         VkDescriptorImageInfo di0 = {R.samp, zview, VK_IMAGE_LAYOUT_GENERAL};
         VkDescriptorImageInfo di1 = {VK_NULL_HANDLE, MV->view, VK_IMAGE_LAYOUT_GENERAL};
         VkDescriptorImageInfo di2 = {VK_NULL_HANDLE, Z->view, VK_IMAGE_LAYOUT_GENERAL};
         VkDescriptorImageInfo di3 = {R.samp, cview, VK_IMAGE_LAYOUT_GENERAL};
         VkDescriptorImageInfo di4 = {R.samp, pv ? R.prevc.view : cview, VK_IMAGE_LAYOUT_GENERAL};
-        VkWriteDescriptorSet wr[5] = {
+        VkDescriptorImageInfo di5 = {R.samp, zv ? ZP->view : zview, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet wr[6] = {
             {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di0},
             {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1,
@@ -1225,9 +1233,11 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
             {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 3, .descriptorCount = 1,
              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di3},
             {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 4, .descriptorCount = 1,
-             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di4}};
+             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di4},
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 5, .descriptorCount = 1,
+             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di5}};
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, R.mv);
-        R.push(cb, VK_PIPELINE_BIND_POINT_COMPUTE, R.layout, 0, 5, wr);
+        R.push(cb, VK_PIPELINE_BIND_POINT_COMPUTE, R.layout, 0, 6, wr);
         vkCmdPushConstants(cb, R.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
         vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
         barrier_all(cb);
