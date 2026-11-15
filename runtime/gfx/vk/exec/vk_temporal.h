@@ -51,13 +51,25 @@ typedef struct {
     uint64_t frame;         // the game frame these belong to
 } VkTmpFgInputs;
 int vk_tmp_fg_inputs(uint64_t frame, VkTmpFgInputs *out);
+// The picture without the HUD (frame generation's DLSSG.HUDLess, FSR's HUDLessColor): the game's last pass recorded a
+// second time from the upscaler's picture before the HUD. vk_tmp_hl_seen: each texture a draw samples (vk_exec_bind.c);
+// vk_tmp_hl_redo_begin / _end around that second recording (vk_exec_ops.c), vk_tmp_hl_redo while it records (the
+// texture memo is passed by). vk_tmp_fg_hudless: that game frame's picture without the HUD, the size and format of the
+// presented one (GENERAL; view not made), 0 when there is none.
+typedef struct VkTmpPic VkTmpPic;
+void vk_tmp_hl_seen(VkImage image);
+int vk_tmp_hl_redo(void);
+int vk_tmp_hl_redo_begin(VkExec *ex);
+void vk_tmp_hl_redo_end(VkExec *ex);
+int vk_tmp_fg_hudless(uint64_t frame, VkTmpPic *out);
 // DLSS Frame Generation (NGX) for vk_framegen.c: count frames between the last call's picture and bb into out[]; returns
 // how many it made, 0 when it cannot (the caller falls back to its own). vk_tmp_ngx_fg_max: the most this GPU makes.
-typedef struct { VkImage img; VkImageView view; VkFormat fmt; uint32_t w, h; } VkTmpPic;
-int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const VkTmpPic *out, int count);
+// hl: the picture without the HUD at bb's size and format (NULL: none).
+struct VkTmpPic { VkImage img; VkImageView view; VkFormat fmt; uint32_t w, h; };
+int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const VkTmpPic *hl, const VkTmpPic *out, int count);
 int vk_tmp_ngx_fg_max(void);
 // FSR 3.1 frame generation (vk_tmp_ffx.cpp): one frame between the last call's picture and bb into out
-int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const VkTmpPic *bb, const VkTmpPic *out);
+int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const VkTmpPic *bb, const VkTmpPic *hl, const VkTmpPic *out);
 
 // FFX (vk_tmp_ffx.cpp)
 int vk_tmp_ffx_load(void);

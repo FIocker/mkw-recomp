@@ -57,7 +57,7 @@ static const char *const known[] = {
     "UPDATE_AS", "UPDATE_CHECK", "UPDATE_REPO", "WINDOW_SIZE", "ZSTD_CHECK", "ZSTD_NATIVE",
     // temporal upscaling and frame generation (gfx/vk/exec/vk_temporal.c), Reflex (gfx/vk/device/vk_reflex.c)
     "CAS", "CAS_SHARPNESS", "DLSSG_EXP", "DLSSG_DISABLE_BUF", "FG_LOG_EVERY", "NGX_LOG", "TEMPORAL_KART_CIRCLE", "TEMPORAL", "TEMPORAL_QUALITY", "TEMPORAL_SHARPNESS", "TEMPORAL_KART", "TEMPORAL_DEBUG", "TEMPORAL_JSIGN",
-    "TEMPORAL_HDR", "TEMPORAL_NGX", "DLSS_PRESET", "FG_ENGINE", "REFLEX",
+    "TEMPORAL_HDR", "TEMPORAL_NGX", "DLSS_PRESET", "FG_ENGINE", "REFLEX", "FG_HUD", "FG_HUDLESS", "HL_TRACE",
 };
 
 // The mkw.ini section a key cfg_set may write goes to when the file lacks it (mkw.ini.example's sections).
@@ -66,7 +66,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"GPU_INDEX", "display"}, {"UPSCALER", "display"}, {"HDR", "display"}, {"SHARPNESS", "display"}, {"PICTURE_FIT", "display"},
     {"DEVICE_PROFILE", "display"}, {"RESOLUTION", "display"}, {"ASPECT", "display"}, {"FPS", "display"}, {"FRAMEGEN", "display"},
     {"CAS", "display"}, {"CAS_SHARPNESS", "display"}, {"TEMPORAL", "display"}, {"TEMPORAL_QUALITY", "display"}, {"TEMPORAL_SHARPNESS", "display"}, {"TEMPORAL_KART", "display"},
-    {"DLSS_PRESET", "display"}, {"FG_ENGINE", "display"}, {"REFLEX", "display"},
+    {"DLSS_PRESET", "display"}, {"FG_ENGINE", "display"}, {"FG_HUD", "display"}, {"REFLEX", "display"},
     {"QUALITY", "graphics"}, {"ANISO", "graphics"}, {"TEX_QUALITY", "graphics"}, {"DETAIL_DISTANCE", "graphics"}, {"SHADOW_SIZE", "graphics"},
     {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"}, {"LAN", "language"},
     {"VOLUME", "audio"}, {"AUDIO_CHANNELS", "audio"}, {"BACKGROUND_MUTE", "audio"},
@@ -115,6 +115,9 @@ static const CfgMeta metas[] = {
     {"DLSS_PRESET", "default", "default|j|k|l|m", LIVE},
     // frame generation's engine: the port's own optical flow, DLSS Frame Generation or FSR 3.1 frame generation
     {"FG_ENGINE", "flow", "flow|dlss|fsr3", LIVE},
+    // the HUD in DLSS-G's and FSR 3.1's made frames: the game frame's own laid over them (own), or the engine's own
+    // handling of the picture without the HUD (engine; vk_framegen.c, fg_hud.comp)
+    {"FG_HUD", "own", "own|engine", LIVE},
     {"REFLEX", "off", "off|on|boost", LIVE},
     // Game
     {"LANG", "", "ja|en-US|fr|de|it|es|zh-CN|ko|nl|pt|ru|zh-TW|en-GB|fr-CA|es-419|zh-Hans|zh-Hant|pt-BR|pl|th|ca|gl|eu", RESTART},

@@ -552,13 +552,24 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
             bind_gen++;
         return;
     }
-    switch (op) {
-    case OP_UPDATE_UB: op_update_ub(ex, payload); break;
-    case OP_DRAW: op_draw(ex, payload); break;
-    case OP_DRAW_IDX: op_draw_idx(ex, payload); break;
-    case OP_DISPATCH: op_dispatch(ex, payload); break;
-    case OP_DRAW_IDX_IND: op_draw_idx_ind(ex, payload); break;
-    case OP_DISPATCH_IND: op_dispatch_ind(ex, payload); break;
-    default: rt_fatal("vk: op %s is not a draw op", nvn_op_name(op));
+    // a draw that samples the upscaler's picture after the HUD went over it (the game's last pass) is recorded once
+    // more into the picture without the HUD, for frame generation (vk_temporal.c)
+    int draw = op == OP_DRAW || op == OP_DRAW_IDX || op == OP_DRAW_IDX_IND;
+    for (int again = 0; again < 2; again++) {
+        if (draw && !again) vk_tmp_hl_seen(VK_NULL_HANDLE);
+        switch (op) {
+        case OP_UPDATE_UB: op_update_ub(ex, payload); break;
+        case OP_DRAW: op_draw(ex, payload); break;
+        case OP_DRAW_IDX: op_draw_idx(ex, payload); break;
+        case OP_DISPATCH: op_dispatch(ex, payload); break;
+        case OP_DRAW_IDX_IND: op_draw_idx_ind(ex, payload); break;
+        case OP_DISPATCH_IND: op_dispatch_ind(ex, payload); break;
+        default: rt_fatal("vk: op %s is not a draw op", nvn_op_name(op));
+        }
+        if (again) {
+            vk_tmp_hl_redo_end(ex);
+            break;
+        }
+        if (!draw || !vk_tmp_hl_redo_begin(ex)) break;
     }
 }

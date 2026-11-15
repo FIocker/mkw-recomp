@@ -31,6 +31,7 @@
 #include "fg_fsr_mv_spv.h"
 #include "fg_luma_spv.h"
 #include "fg_median_spv.h"
+#include "fg_hud_spv.h"
 #include "fg_synth_spv.h"
 #include "hacks.h"
 #include "vk_temporal.h"
@@ -65,6 +66,21 @@ static struct {
     // DLSS-G and FSR 3.1 on an HDR10 picture: the game's picture and the made frames in its own 10-bit format (the
     // optical flow's images above are 8-bit), made at first use
     Img hpic, hmade[VK_FG_MAX - 1];
+    // the game frame's picture without the HUD (vk_tmp_fg_hudless), cropped as the picture: rgba8, and the HDR10 one
+    Img hl, hhl;
+    int hl_fresh, hhl_fresh;
+    // the last game frame's: its picture without the HUD and (HDR10) its picture, swapped with the above after each
+    // frame; hl_okp: that frame had its picture without the HUD (fg_hud.comp measures the HUD's coverage from both)
+    Img hlp, hhlp, hpicp;
+    int hl_okp, hp_okp;
+    VkImage hl_dump;   // this frame's picture without the HUD (the dump reads it after the swap)
+    // fg_hud.comp: the game frame's HUD over the made frames (MKW_FG_HUD=own, the default)
+    VkDescriptorSetLayout hdsl;
+    VkPipelineLayout hlayout;
+    VkPipeline hud;
+    int hud_tried;
+    uint64_t hl_given, hl_missing, hud_frames;
+    int hl_last;   // the last frame had one (MKW_FG_DUMP writes it)
     int hw, hh;
     VkFormat hfmt;
     int mv_w, mv_h;
@@ -217,6 +233,8 @@ static void free_images(VkCtx *c) {
     for (int i = 0; i < VK_FG_MAX - 1; i++) free_img(c, &F.made[i]), free_img(c, &F.hmade[i]);
     free_img(c, &F.fsr_mv);
     free_img(c, &F.hpic);
+    free_img(c, &F.hl), free_img(c, &F.hhl), free_img(c, &F.hlp), free_img(c, &F.hhlp), free_img(c, &F.hpicp);
+    F.hl_okp = F.hp_okp = 0;
     F.hw = F.hh = 0, F.hfmt = VK_FORMAT_UNDEFINED;
     F.mv_w = F.mv_h = 0;
     F.w = F.h = 0;
@@ -264,6 +282,9 @@ static int ensure_images(VkCtx *c, int w, int h) {
         ok = ok && make_img(c, &F.fl[i], i < 2 ? (gw + 1) / 2 : gw, i < 2 ? (gh + 1) / 2 : gh, VK_FORMAT_R16G16_SFLOAT, 0);
     for (int i = 0; i < VK_FG_MAX - 1; i++)
         ok = ok && make_img(c, &F.made[i], (uint32_t)w, (uint32_t)h, VK_FORMAT_R8G8B8A8_UNORM, XS);
+    ok = ok && make_img(c, &F.hl, (uint32_t)w, (uint32_t)h, VK_FORMAT_R8G8B8A8_UNORM, XS | XD) &&
+         make_img(c, &F.hlp, (uint32_t)w, (uint32_t)h, VK_FORMAT_R8G8B8A8_UNORM, XS | XD);
+    F.hl_fresh = 1;
     if (!ok) {
         rt_log("vk: frame generation: no memory for its %dx%d images; off until the size changes", w, h);
         free_images(c);
@@ -354,6 +375,63 @@ static void fsr_motion_pass(VkCommandBuffer cb, const VkTmpFgInputs *in, const I
     mem_barrier(cb);
 }
 
+// fg_hud.comp's pipeline: five pictures sampled, the made frame written in place (each pixel reads only its own)
+static int hud_init(VkCtx *c) {
+    if (F.hud_tried) return F.hud != VK_NULL_HANDLE;
+    F.hud_tried = 1;
+    VkDescriptorSetLayoutBinding b[6];
+    for (int i = 0; i < 6; i++)
+        b[i] = (VkDescriptorSetLayoutBinding){.binding = (uint32_t)i, .descriptorCount = 1,
+                                              .descriptorType = i < 5 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                                                      : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                              .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+                                           .bindingCount = 6, .pBindings = b};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof fg_hud_spv,
+                                   .pCode = fg_hud_spv};
+    VkShaderModule m = VK_NULL_HANDLE;
+    if (vkCreateDescriptorSetLayout(c->device, &dci, NULL, &F.hdsl) != VK_SUCCESS) return 0;
+    VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = &F.hdsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    if (vkCreatePipelineLayout(c->device, &li, NULL, &F.hlayout) != VK_SUCCESS ||
+        vkCreateShaderModule(c->device, &mi, NULL, &m) != VK_SUCCESS) {
+        rt_log("vk: frame generation: the HUD pass could not be set up: the engine takes the HUD apart itself");
+        return 0;
+    }
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
+                                      .layout = F.hlayout};
+    if (vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, &F.hud) != VK_SUCCESS) F.hud = VK_NULL_HANDLE;
+    vkDestroyShaderModule(c->device, m, NULL);
+    rt_log("vk: frame generation: the game's HUD over the made frames %s", F.hud ? "(fg_hud.comp)" : "could not be set up");
+    return F.hud != VK_NULL_HANDLE;
+}
+
+static void hud_pass(VkCommandBuffer cb, const Img *fc, const Img *sc, const Img *fp, const Img *sp, const Img *g, int mode,
+                     int prev_ok, int w, int h) {
+    const Img *in[5] = {fc, sc, fp, sp, g};
+    VkDescriptorImageInfo ii[6];
+    VkWriteDescriptorSet wr[6];
+    for (int i = 0; i < 6; i++) {
+        ii[i] = (VkDescriptorImageInfo){i < 5 ? F.sampler : VK_NULL_HANDLE, (i < 5 ? in[i] : g)->view,
+                                        VK_IMAGE_LAYOUT_GENERAL};
+        wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = (uint32_t)i,
+                                       .descriptorCount = 1,
+                                       .descriptorType = i < 5 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                                               : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                       .pImageInfo = &ii[i]};
+    }
+    const int pc[4] = {mode, prev_ok, w, h};
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.hud);
+    rec_push(F.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.hlayout, 0, 6, wr);
+    vkCmdPushConstants(cb, F.hlayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, pc);
+    vkCmdDispatch(cb, ((uint32_t)w + 7) / 8, ((uint32_t)h + 7) / 8, 1);
+    mem_barrier(cb);
+}
+
 int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop[4], int made, VkImage out[VK_FG_MAX],
                  int *ow, int *oh) {
     VkCtx *c = vk_ctx();
@@ -369,6 +447,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     if (cw <= 0 || ch <= 0 || !ensure_images(c, cw, ch)) return 0;
     if (made > VK_FG_MAX - 1) made = VK_FG_MAX - 1;
     if (!F.have_prev) made = 0;
+    F.hl_last = 0;
     const int cur = F.cur, prev = cur ^ 1;
     const VkPipelineStageFlags2 ALL = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, XF = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     if (F.fresh) {
@@ -435,15 +514,20 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
         vk_queue_lock();
         vkDeviceWaitIdle(c->device);
         vk_queue_unlock();
-        free_img(c, &F.hpic);
+        free_img(c, &F.hpic), free_img(c, &F.hhl), free_img(c, &F.hpicp), free_img(c, &F.hhlp);
+        F.hp_okp = F.hl_okp = 0;
         for (int i = 0; i < VK_FG_MAX - 1; i++) free_img(c, &F.hmade[i]);
         const VkImageUsageFlags X = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        int ok = make_img(c, &F.hpic, (uint32_t)cw, (uint32_t)ch, vk_fg_src_format, X);
+        int ok = make_img(c, &F.hpic, (uint32_t)cw, (uint32_t)ch, vk_fg_src_format, X) &&
+                 make_img(c, &F.hhl, (uint32_t)cw, (uint32_t)ch, vk_fg_src_format, X) &&
+                 make_img(c, &F.hpicp, (uint32_t)cw, (uint32_t)ch, vk_fg_src_format, X) &&
+                 make_img(c, &F.hhlp, (uint32_t)cw, (uint32_t)ch, vk_fg_src_format, X);
+        F.hhl_fresh = 1;
         for (int i = 0; i < VK_FG_MAX - 1; i++) ok = ok && make_img(c, &F.hmade[i], (uint32_t)cw, (uint32_t)ch, vk_fg_src_format, X);
         if (ok) {
             F.hw = cw, F.hh = ch, F.hfmt = vk_fg_src_format;
-            Img *all[] = {&F.hpic, &F.hmade[0], &F.hmade[1], &F.hmade[2]};
-            for (int i = 0; i < 4; i++)
+            Img *all[] = {&F.hpic, &F.hmade[0], &F.hmade[1], &F.hmade[2], &F.hhl, &F.hpicp, &F.hhlp};
+            for (int i = 0; i < 7; i++)
                 img_barrier(cb, all[i]->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
                             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         } else {
@@ -461,12 +545,41 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
         VkFormat pf = use_h ? F.hfmt : VK_FORMAT_R8G8B8A8_UNORM;
         const Img *P = use_h ? &F.hpic : &F.pic[cur], *M = use_h ? F.hmade : F.made;
         VkTmpPic bb = {P->img, P->view, pf, (uint32_t)cw, (uint32_t)ch};
+        // the same frame's picture without the HUD (vk_temporal.c), cropped the same way into an image of bb's format
+        VkTmpPic hls, hl;
+        const VkTmpPic *hlp = NULL;
+        Img *H = use_h ? &F.hhl : &F.hl;
+        if (H->img && vk_tmp_fg_hudless(vk_fg_game_frame, &hls) && (int)hls.w == sw && (int)hls.h == sh &&
+            hls.fmt == vk_fg_src_format) {
+            if (!use_h && F.hl_fresh) {
+                img_barrier(cb, F.hl.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
+                            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+                img_barrier(cb, F.hlp.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0, ALL,
+                            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+                F.hl_fresh = 0;
+            }
+            mem_barrier(cb);
+            vkCmdBlitImage(cb, hls.img, VK_IMAGE_LAYOUT_GENERAL, H->img, VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_NEAREST);
+            mem_barrier(cb);
+            hl = (VkTmpPic){H->img, H->view, pf, (uint32_t)cw, (uint32_t)ch};
+            hlp = &hl;
+            F.hl_given++;
+        } else {
+            F.hl_missing++;
+        }
+        F.hl_last = hlp != NULL;
+        F.hl_dump = hlp ? H->img : VK_NULL_HANDLE;
+        // MKW_FG_HUD=own (default): the engine interpolates the pictures without the HUD and fg_hud.comp puts the
+        // game frame's HUD back over its frames; =engine: the picture with the HUD and the one without it go to the
+        // engine (DLSSG.HUDLess, HUDLessColor), which takes the HUD apart itself
+        int own = hlp && strcmp(cfg_value("MKW_FG_HUD"), "engine") != 0 && hud_init(c);
+        const VkTmpPic *in_pic = own ? &hl : &bb, *in_hl = own ? NULL : hlp;
         VkTmpPic outs[VK_FG_MAX - 1];
         for (int k = 0; k < VK_FG_MAX - 1; k++)
             outs[k] = (VkTmpPic){M[k].img, M[k].view, pf, (uint32_t)cw, (uint32_t)ch};
         int got = 0;
         if (eng == 1) {
-            got = vk_tmp_dlssg(cb, vk_fg_game_frame, &bb, outs, made);
+            got = vk_tmp_dlssg(cb, vk_fg_game_frame, in_pic, in_hl, outs, made);
         } else {
             VkTmpFgInputs in;
             if (have_fgin || vk_tmp_fg_inputs(vk_fg_game_frame, &in)) {
@@ -478,7 +591,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                     fsr_motion_pass(cb, &in, &F.pic[cur], &F.pic[prev], &F.fl[5], &F.fsr_mv, pc, in.w, in.h);
                     in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
                 }
-                got = vk_tmp_ffx_fg(cb, &in, &bb, &outs[0]);
+                got = vk_tmp_ffx_fg(cb, &in, in_pic, in_hl, &outs[0]);
                 // Readback-only twin at the FSR frame's midpoint. FSR uses M[0]; this spare image never enters out[].
                 if (got == 1 && compare_native && !use_h && flow_ready) {
                     const float pc[4] = {0.5f, 1.0f / (16.0f * (float)gw), 1.0f / (16.0f * (float)gh), 0};
@@ -492,9 +605,21 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             if (last_eng != eng) last_eng = eng, rt_log("vk: frame generation by %s", eng == 1 ? "DLSS Frame Generation" : "FSR 3.1");
             made = got;
             mem_barrier(cb);
+            if (own) {   // the game frame's HUD over each made frame
+                const Img *PP = use_h ? &F.hpicp : &F.pic[prev], *HP = use_h ? &F.hhlp : &F.hlp;
+                int prev_ok = F.hl_okp && F.have_prev && (!use_h || F.hp_okp);
+                int mode = !use_h ? 0 : pf == VK_FORMAT_R16G16B16A16_SFLOAT ? 2 : 1;
+                for (int k = 0; k < made; k++) hud_pass(cb, P, H, PP, HP, &M[k], mode, prev_ok, cw, ch);
+                F.hud_frames++;
+            }
             for (int k = 0; k < made; k++) out[k] = M[k].img;
             out[made] = P->img;
             vk_fg_out_format = pf;
+            // this frame's pictures become the last frame's (the images handed out above stay as they are)
+            Img t;
+            if (use_h) t = F.hpic, F.hpic = F.hpicp, F.hpicp = t, t = F.hhl, F.hhl = F.hhlp, F.hhlp = t;
+            else t = F.hl, F.hl = F.hlp, F.hlp = t;
+            F.hl_okp = hlp != NULL, F.hp_okp = use_h;
             *ow = cw, *oh = ch;
             if (have_fgin) F.last_jx = fgin.jx, F.last_jy = fgin.jy, F.have_jitter = 1;
             F.have_prev = 1;
@@ -522,6 +647,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     *ow = cw, *oh = ch;
     F.have_prev = 1;
     F.cur = prev;
+    F.hl_okp = F.hp_okp = 0;
     return made + 1;
 }
 
@@ -567,21 +693,30 @@ uint64_t vk_fg_game_frame;   // the game frame vk_fg_frame is called for (vk_bac
 VkFormat vk_fg_src_format = VK_FORMAT_R8G8B8A8_UNORM;   // that frame's picture format (vk_backend.c)
 VkFormat vk_fg_out_format = VK_FORMAT_R8G8B8A8_UNORM;   // the format of the frames vk_fg_frame handed out
 
-static struct { uint64_t at; VkBuffer buf; VmaAllocation alloc; void *map; VkDeviceSize size; int ref; } D;
+// The four frames go into one buffer, each its own part, and are written once the last is done: a wait for the GPU and
+// the PNG encoding at each dumped frame held the present thread long enough to reset frame generation at the next one
+// (m == g, 15/11/2026), so the frames dumped were not those of a steady run.
+#define DUMP_N 4
+static struct {
+    uint64_t at;
+    VkBuffer buf;
+    VmaAllocation alloc;
+    void *map;
+    VkDeviceSize size;
+    int n[DUMP_N], hl[DUMP_N], ref[DUMP_N], w, h;
+} D;
 
 static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int h, VkImage native_ref) {
     if (!D.at) {
         const char *e = cfg_get("MKW_FG_DUMP");
         D.at = e && atoll(e) > 0 ? (uint64_t)atoll(e) : UINT64_MAX;
     }
-    if (F.frames < D.at || F.frames >= D.at + 4 || (D.buf && D.size < (VkDeviceSize)w * h * 12)) {
-        D.ref = 0;
-        return 0;
-    }
+    VkDeviceSize part = (VkDeviceSize)w * h * 16;
+    if (F.frames < D.at || F.frames >= D.at + DUMP_N || (D.buf && (D.w != w || D.h != h))) return 0;
     VkCtx *c = vk_ctx();
     if (!D.buf) {
-        D.size = (VkDeviceSize)w * h * 12;
-        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)w * h * 12,
+        D.size = part * DUMP_N, D.w = w, D.h = h;
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = D.size,
                                  .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
@@ -589,39 +724,43 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
         if (vmaCreateBuffer(c->vma, &bi, &ai, &D.buf, &D.alloc, &info) != VK_SUCCESS) return D.at = UINT64_MAX, 0;
         D.map = info.pMappedData;
     }
-    VkBufferImageCopy bc = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {(uint32_t)w, (uint32_t)h, 1}};
+    int k = (int)(F.frames - D.at);
+    VkDeviceSize base = part * (VkDeviceSize)k;
+    D.n[k] = n;
+    D.hl[k] = F.hl_last && F.hl_dump && vk_fg_out_format == VK_FORMAT_R8G8B8A8_UNORM;
+    VkBufferImageCopy bc = {.bufferOffset = base, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                            .imageExtent = {(uint32_t)w, (uint32_t)h, 1}};
     vkCmdCopyImageToBuffer(cb, out[n - 1], VK_IMAGE_LAYOUT_GENERAL, D.buf, 1, &bc);
-    bc.bufferOffset = (VkDeviceSize)w * h * 4;
+    bc.bufferOffset = base + (VkDeviceSize)w * h * 4;
     if (n > 1) vkCmdCopyImageToBuffer(cb, out[0], VK_IMAGE_LAYOUT_GENERAL, D.buf, 1, &bc);
-    D.ref = native_ref != VK_NULL_HANDLE;
-    if (D.ref) {
-        bc.bufferOffset = (VkDeviceSize)w * h * 8;
-        vkCmdCopyImageToBuffer(cb, native_ref, VK_IMAGE_LAYOUT_GENERAL, D.buf, 1, &bc);
-    }
+    bc.bufferOffset = base + (VkDeviceSize)w * h * 8;   // the picture without the HUD (8-bit only)
+    if (D.hl[k]) vkCmdCopyImageToBuffer(cb, F.hl_dump, VK_IMAGE_LAYOUT_GENERAL, D.buf, 1, &bc);
+    D.ref[k] = native_ref != VK_NULL_HANDLE;
+    bc.bufferOffset = base + (VkDeviceSize)w * h * 12;
+    if (D.ref[k]) vkCmdCopyImageToBuffer(cb, native_ref, VK_IMAGE_LAYOUT_GENERAL, D.buf, 1, &bc);
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
                            .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
     VkDependencyInfo d = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkCmdPipelineBarrier2(cb, &d);
-    return 1;
+    return k == DUMP_N - 1;   // the last: written once this submission is done
 }
 
-static void dump_write(VkFence fence, int n, int w, int h) {
+static void dump_write(VkFence fence) {
     VkCtx *c = vk_ctx();
     vkWaitForFences(c->device, 1, &fence, VK_TRUE, 5000000000ull);
     vmaInvalidateAllocation(c->vma, D.alloc, 0, VK_WHOLE_SIZE);
     const char *dir = cfg_get("MKW_FG_DUMP_DIR") ? cfg_get("MKW_FG_DUMP_DIR") : ".";
     char path[1024];
-    for (int k = 0; k < (n > 1 ? 2 : 1); k++) {
-        snprintf(path, sizeof path, "%s/%c%llu.png", dir, k ? 'm' : 'g', (unsigned long long)F.frames);
-        rt_write_png(path, (const uint8_t *)D.map + (size_t)k * w * h * 4, (uint32_t)w, (uint32_t)h);
-    }
-    if (D.ref) {
-        snprintf(path, sizeof path, "%s/r%llu.png", dir, (unsigned long long)F.frames);
-        rt_write_png(path, (const uint8_t *)D.map + (size_t)2 * w * h * 4, (uint32_t)w, (uint32_t)h);
-    }
-    rt_log("vk: frame generation: game frame %llu written to %s (interval %.1f ms)", (unsigned long long)F.frames, dir,
-           F.interval / 1e6);
+    size_t px = (size_t)D.w * D.h * 4;
+    for (int f = 0; f < DUMP_N; f++)
+        for (int k = 0; k < 4; k++) {
+            if (!D.n[f] || (k == 1 && D.n[f] < 2) || (k == 2 && !D.hl[f]) || (k == 3 && !D.ref[f])) continue;
+            snprintf(path, sizeof path, "%s/%c%llu.png", dir, "gmhr"[k], (unsigned long long)(D.at + (uint64_t)f));
+            rt_write_png(path, (const uint8_t *)D.map + px * 4 * (size_t)f + px * (size_t)k, (uint32_t)D.w, (uint32_t)D.h);
+        }
+    rt_log("vk: frame generation: game frames %llu-%llu written to %s (interval %.1f ms)", (unsigned long long)D.at,
+           (unsigned long long)(D.at + DUMP_N - 1), dir, F.interval / 1e6);
 }
 
 int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkImage out[VK_FG_MAX], int *w, int *h,
@@ -685,15 +824,19 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
         F.have_prev = 0;
         return 0;
     }
-    if (dump) dump_write(F.fence[slot], n, *w, *h);
+    if (dump) dump_write(F.fence[slot]);
     *step = F.interval / (uint64_t)n;
     F.frames++, F.made_total += (uint64_t)(n - 1);
     if (m != F.logged_mult || F.frames % (cfg_get("MKW_FG_LOG_EVERY") && atoll(cfg_get("MKW_FG_LOG_EVERY")) > 0 ? (uint64_t)atoll(cfg_get("MKW_FG_LOG_EVERY")) : 1800) == 0) {   // ~1 min at 30 fps
         F.logged_mult = m;
         rt_log("vk: frame generation %dx: game frame every %.1f ms, %llu frames made over %llu game frames; GPU per game "
-               "frame %.2f ms mean, %.2f max, %u longer than a step (%.1f ms)", m, F.interval / 1e6,
-               (unsigned long long)F.made_total, (unsigned long long)F.frames, F.gpu_n ? F.gpu_sum / F.gpu_n : 0.0,
-               F.gpu_max, F.gpu_over, m ? F.interval / 1e6 / m : 0.0);
+               "frame %.2f ms mean, %.2f max, %u longer than a step (%.1f ms); without the HUD %llu, HUD seen %llu", m,
+               F.interval / 1e6, (unsigned long long)F.made_total, (unsigned long long)F.frames,
+               F.gpu_n ? F.gpu_sum / F.gpu_n : 0.0, F.gpu_max, F.gpu_over, m ? F.interval / 1e6 / m : 0.0,
+               (unsigned long long)F.hl_given, (unsigned long long)F.hl_missing);
+        if (F.hud_frames)
+            rt_log("vk: frame generation: the game's HUD put over the made frames of %llu game frames",
+                   (unsigned long long)F.hud_frames);
         F.gpu_sum = F.gpu_max = 0, F.gpu_n = F.gpu_over = 0;
     }
     return n;
@@ -717,6 +860,9 @@ void vk_fg_release(void) {
     for (int i = 0; i < SLOTS; i++)
         if (F.fence[i]) vkDestroyFence(c->device, F.fence[i], NULL);
     if (F.qp) vkDestroyQueryPool(c->device, F.qp, NULL);
+    if (F.hud) vkDestroyPipeline(c->device, F.hud, NULL);
+    if (F.hlayout) vkDestroyPipelineLayout(c->device, F.hlayout, NULL);
+    if (F.hdsl) vkDestroyDescriptorSetLayout(c->device, F.hdsl, NULL);
     if (F.pool) vkDestroyCommandPool(c->device, F.pool, NULL);
     if (F.sampler) vkDestroySampler(c->device, F.sampler, NULL);
     if (F.fsr_layout) vkDestroyPipelineLayout(c->device, F.fsr_layout, NULL);

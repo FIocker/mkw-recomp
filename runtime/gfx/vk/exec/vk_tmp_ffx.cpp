@@ -247,7 +247,8 @@ FfxApiResource pic(const VkTmpPic *p, int write) {
 }
 }  // namespace
 
-extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const VkTmpPic *bb, const VkTmpPic *out) {
+extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const VkTmpPic *bb, const VkTmpPic *hl,
+                             const VkTmpPic *out) {
     if (!vk_tmp_ffx_load() || FG.failed) return 0;
     const VkCtx *c = vk_ctx();
     if (FG.ctx && (FG.w != bb->w || FG.h != bb->h || FG.fmt != bb->fmt || in->w > FG.rw || in->h > FG.rh)) fg_destroy();
@@ -296,6 +297,9 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
     cf.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
     cf.generationRect = {0, 0, (int32_t)bb->w, (int32_t)bb->h};
     cf.frameID = FG.id;
+    // the picture without the HUD (vk_tmp_fg_hudless; bb's format and size): FSR 3.1 takes the HUD from the
+    // difference and keeps it out of the interpolation
+    if (hl) cf.HUDLessColor = pic(hl, 0);
     ffxReturnCode_t r = A.configure(&FG.ctx, &cf.header);
     if (r != FFX_API_RETURN_OK) {
         FG.failed = 1;

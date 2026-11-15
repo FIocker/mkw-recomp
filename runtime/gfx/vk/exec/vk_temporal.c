@@ -833,10 +833,143 @@ void vk_tmp_scale_rect(const VkExec *ex, float *x, float *y, float *w, float *h)
     *x *= sx, *w *= sx, *y *= sy, *h *= sy;
 }
 
+// ---------------------------------------------------------------- the picture without the HUD (frame generation)
+// DLSS-G and FSR 3.1 frame generation tell the HUD from the scene by a copy of the presented picture without it
+// (DLSSG.HUDLess, FSR's HUDLessColor); without one the HUD is warped with the scene: the race timer's last digits came
+// out smeared in DLSS-G's made frames (nooverride m1301, 15/11/2026). The game draws its HUD over the upscaler's picture
+// in the screen target, and its last pass then scales and encodes that into the window's picture (sRGB, or PQ with
+// HDR10). So the upscaler's picture is also blitted into an image of our own (HL.snap) before the HUD, and the game's
+// last pass -- the first draw after it that samples the screen target into a target of the presented picture's size -- is
+// recorded a second time with HL.snap in the screen target's place, into an image of the window picture's format and
+// size (HL.out): the same scale and the same encode as the presented picture, without the HUD (NX2navi encodes its
+// HUD-less picture itself, gfx_present.c hudless_record; here the game's own pass does it). Only with frame generation.
+static struct {
+    Own snap;                    // the upscaler's picture in the screen target's format, before the HUD
+    VkImage out;                 // the last pass again, from snap: the window's picture without the HUD
+    VmaAllocation out_mem;
+    VkFormat out_fmt;            // its image format (the window picture's), rendered through a view of the target's
+    uint32_t out_w, out_h;
+    VkImage dst;                 // where the upscaler's picture went this frame (the screen target, or R.big)
+    uint64_t snap_frame, out_frame, redos;
+    VkExecTarget saved;
+    int told;
+} HL;
+static _Thread_local int hl_saw, hl_redo;
+
 void vk_tmp_sampled(VkImage *image, VkImageView *view) {
-    if (!RT.on || *image != RT.src || !R.big.view) return;
-    *image = R.big.img;
-    *view = R.big.view;
+    if (RT.on && *image == RT.src && R.big.view) *image = R.big.img, *view = R.big.view;
+    if (hl_redo && HL.dst && *image == HL.dst && HL.snap.view) *image = HL.snap.img, *view = HL.snap.view;
+}
+
+void vk_tmp_hl_seen(VkImage image) {   // VK_NULL_HANDLE: a draw starts
+    if (!image) hl_saw = 0;
+    else if (image == HL.dst && HL.snap_frame == T.frame) {
+        hl_saw = 1;
+        static int n;
+        if (cfg_get("MKW_HL_TRACE") && T.frame > 1900 && n < 10) n++, rt_log("temporal: hl sampled in f%llu", (unsigned long long)T.frame);
+    }
+    else if (image == HL.dst) {
+        static int n;
+        if (cfg_get("MKW_HL_TRACE") && T.frame > 1900 && n < 20) n++, rt_log("temporal: hl seen in f%llu, snap of f%llu", (unsigned long long)T.frame, (unsigned long long)HL.snap_frame);
+    }
+}
+
+int vk_tmp_hl_redo(void) { return hl_redo; }
+
+static int hl_wanted(void) {
+    const char *e = cfg_get("MKW_FG_HUDLESS");   // MKW_FG_HUDLESS=0: frame generation sees the HUD (to compare)
+    return vk_fg_wanted() && !(e && !strcmp(e, "0"));
+}
+
+static void hl_out_free(void *arg) {   // completion thread
+    OwnGone *g = arg;
+    const VkCtx *c = vk_ctx();
+    if (c) vmaDestroyImage(c->vma, g->img, g->mem);
+    free(g);
+}
+
+int vk_tmp_hl_redo_begin(VkExec *ex) {
+    int saw = hl_saw;
+    hl_saw = 0;
+    if (!saw || hl_redo || HL.snap_frame != T.frame || HL.out_frame == T.frame) return 0;
+    const VkExecTarget *t = &ex->color[0];
+    {   // MKW_HL_TRACE=1: why a draw that sampled the upscaler's picture was not taken as the last pass
+        static int on = -1, n;
+        if (on < 0) on = cfg_get("MKW_HL_TRACE") ? atoi(cfg_get("MKW_HL_TRACE")) : 0;
+        if (on && n < 40 && T.frame > 1900)
+            n++, rt_log("temporal: hl f%llu draw into %p %ux%u fmt %d ncolor %u depth %p layers %u samples %u is3d %d blocks %d "
+                        "level %u (dst %p, src %p, snap %ux%u)", (unsigned long long)T.frame, (void *)t->image, t->width,
+                        t->height, (int)t->format, ex->pass_ncolor, (void *)ex->depth.image, t->layers, t->samples, t->is3d,
+                        t->blocks, t->level, (void *)HL.dst, (void *)RT.src, HL.snap.w, HL.snap.h);
+    }
+    if (!t->image || t->image == HL.dst || t->image == RT.src || ex->pass_ncolor != 1 || ex->depth.image ||
+        t->width != RT.ow || t->height != RT.oh || t->layers != 1 || t->samples > 1 || t->is3d || t->blocks ||
+        t->level || !(t->aspect & VK_IMAGE_ASPECT_COLOR_BIT))
+        return 0;
+    VkFormat imf = t->img ? t->img->format : t->format;
+    const VkCtx *c = vk_ctx();
+    if (!HL.out || HL.out_w != t->width || HL.out_h != t->height || HL.out_fmt != imf) {
+        if (HL.out) {
+            OwnGone *g = malloc(sizeof *g);
+            if (!g) rt_fatal("temporal: out of memory");
+            *g = (OwnGone){HL.out, HL.out_mem, VK_NULL_HANDLE};
+            vk_completion_add(ex->fence, hl_out_free, g);
+            HL.out = VK_NULL_HANDLE;
+        }
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = imf,
+                                .flags = imf != t->format ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0,
+                                .extent = {t->width, t->height, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(c->vma, &ci, &ai, &HL.out, &HL.out_mem, NULL) != VK_SUCCESS) {
+            HL.out = VK_NULL_HANDLE;
+            if (!HL.told++) rt_log("temporal: no memory for the picture without the HUD: frame generation sees the HUD");
+            return 0;
+        }
+        HL.out_w = t->width, HL.out_h = t->height, HL.out_fmt = imf;
+        vk_exec_pass_end(ex);
+        VkImageMemoryBarrier2 b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                   .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                   .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                   .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                   .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .image = HL.out, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
+                               .pImageMemoryBarriers = &b};
+        vkCmdPipelineBarrier2(ex->cb, &di);
+        rt_log("temporal: the picture without the HUD at %ux%u (format %d, drawn as %d)", t->width, t->height, (int)imf,
+               (int)t->format);
+    }
+    vk_exec_pass_end(ex);
+    HL.saved = ex->color[0];
+    VkExecTarget *w = &ex->color[0];
+    w->image = HL.out;
+    w->img = NULL;   // view_of makes the view (of the target's format) for this command buffer
+    hl_redo = 1;
+    vk_exec_draw_forget();   // nothing bound is known: the second recording binds its textures (HL.snap) anew
+    ex->dirty = VK_EXEC_DIRTY_ALL;
+    return 1;
+}
+
+void vk_tmp_hl_redo_end(VkExec *ex) {
+    vk_exec_pass_end(ex);
+    ex->color[0] = HL.saved;
+    ex->rt_resolved = 0;   // the game's targets again, resolved at the next draw
+    hl_redo = 0;
+    vk_exec_draw_forget();
+    ex->dirty = VK_EXEC_DIRTY_ALL;
+    HL.out_frame = T.frame;
+    if (HL.redos++ % 1800 == 0)
+        rt_log("temporal: the last pass recorded again without the HUD (%llu frames)", (unsigned long long)HL.redos);
+}
+
+int vk_tmp_fg_hudless(uint64_t frame, VkTmpPic *out) {
+    if (!frame || HL.out_frame != frame || !HL.out) return 0;
+    *out = (VkTmpPic){HL.out, VK_NULL_HANDLE, HL.out_fmt, HL.out_w, HL.out_h};
+    return 1;
 }
 
 static int retarget_wanted(uint32_t sw, uint32_t sh) {
@@ -1198,6 +1331,17 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
         }
         vkCmdBlitImage(cb, pic, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
                        VK_FILTER_LINEAR);
+        // the same picture before the HUD for frame generation (HL, above): the same blit into an image of our own
+        uint32_t sw = (uint32_t)bl.dstOffsets[1].x, sh = (uint32_t)bl.dstOffsets[1].y;
+        if (hl_wanted() && own_image(&HL.snap, sw, sh, dst == R.big.img ? R.big.fmt : out->format)) {
+            vkCmdBlitImage(cb, pic, VK_IMAGE_LAYOUT_GENERAL, HL.snap.img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+                           VK_FILTER_LINEAR);
+            HL.dst = dst, HL.snap_frame = T.frame;
+            static int told;
+            if (!told++ || (cfg_get("MKW_HL_TRACE") && told < 10 && T.frame > 1900))
+                rt_log("temporal: the upscaler's picture kept before the HUD (%ux%u) f%llu dst %p", sw, sh,
+                       (unsigned long long)T.frame, (void *)dst);
+        }
         barrier_all(cb);
         T.reset = 0;
         T.done = 1;
@@ -1279,8 +1423,10 @@ void vk_tmp_shutdown(void) {
         if (FC[i].feat && N.release) N.release(FC[i].feat), FC[i].feat = NULL;
     dlssg_release();
     vk_tmp_ffx_shutdown();
-    Own *o[10] = {&R.mvs[0], &R.mvs[1], &R.mvs[2], &R.outimg, &R.zs[0], &R.zs[1], &R.zs[2], &R.big, &R.prevc, &R.casimg};
-    for (int i = 0; i < 10; i++)
+    Own *o[11] = {&R.mvs[0], &R.mvs[1], &R.mvs[2], &R.outimg, &R.zs[0], &R.zs[1], &R.zs[2], &R.big, &R.prevc, &R.casimg,
+                  &HL.snap};
+    if (HL.out) vmaDestroyImage(c->vma, HL.out, HL.out_mem), HL.out = VK_NULL_HANDLE;
+    for (int i = 0; i < 11; i++)
         if (o[i]->img) vkDestroyImageView(c->device, o[i]->view, NULL), vmaDestroyImage(c->vma, o[i]->img, o[i]->mem), *o[i] = (Own){0};
     if (R.cas) vkDestroyPipeline(c->device, R.cas, NULL), R.cas = VK_NULL_HANDLE;
     if (N.up && N.shutdown1) N.shutdown1(c->device), N.up = 0;
@@ -1289,8 +1435,8 @@ void vk_tmp_shutdown(void) {
 // ---------------------------------------------------------------- DLSS Frame Generation through NGX (vk_framegen.c)
 // vk_framegen.c's present-thread command buffer, once the game's picture (HUD included) is copied into bb: count
 // frames between the last call's picture and this one into out[] (MultiFrameIndex 1..count, in display order), from
-// the depth, motion vectors, jitter and camera of the same game frame's upscale (vk_tmp_fg_inputs). The picture
-// without the HUD is not given: DLSS-G separates the HUD itself from the two pictures.
+// the depth, motion vectors, jitter and camera of the same game frame's upscale (vk_tmp_fg_inputs), and the picture
+// without the HUD (DLSSG.HUDLess) when the frame has one: without it the HUD moved with the scene.
 #define NGX_FEATURE_FRAME_GENERATION 11
 static struct {
     NgxHandle *feat;
@@ -1313,7 +1459,7 @@ static void fg_store(float out[16], const double m[16]) {   // handed out transp
         for (int k = 0; k < 4; k++) out[r * 4 + k] = (float)m[k * 4 + r];
 }
 
-int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const VkTmpPic *out, int count) {
+int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const VkTmpPic *hl, const VkTmpPic *out, int count) {
     if (!N.up || !N.fg_max || G.failed || count < 1) return 0;
     if (count > N.fg_max) count = N.fg_max;
     VkTmpFgInputs in;
@@ -1411,7 +1557,10 @@ int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const V
     p_setp(p, "DLSSG.Backbuffer", &rb);
     p_setp(p, "DLSSG.Depth", &rz);
     p_setp(p, "DLSSG.MVecs", &rm);
-    p_setp(p, "DLSSG.HUDLess", NULL);
+    // the picture without the HUD (vk_tmp_fg_hudless), so DLSS-G keeps the HUD out of its motion
+    NgxResourceVK rh;
+    if (hl) rh = res_image(hl->view, hl->img, hl->fmt, hl->w, hl->h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
+    p_setp(p, "DLSSG.HUDLess", hl ? &rh : NULL);
     p_setp(p, "DLSSG.UI", NULL);
     p_setp(p, "DLSSG.UIAlpha", NULL);
     p_setp(p, "DLSSG.BidirectionalDistortionField", NULL);

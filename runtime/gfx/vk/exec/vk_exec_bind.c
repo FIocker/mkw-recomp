@@ -16,6 +16,7 @@
 #include "vk.h"
 #include "vk_draw_internal.h"
 #include "vk_exec.h"
+#include "vk_temporal.h"
 #include "vk_reuse.h"
 #include "platform/platform.h"
 
@@ -319,9 +320,10 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
                      int *locked) {
     int td_on = td_mode();
     VkImage image;
-    if (!h || storage || !td_on) {
+    if (!h || storage || !td_on || vk_tmp_hl_redo()) {   // (the last pass again without the HUD: vk_temporal.c)
         tex_lock_once(locked);
         td_stat[3]++, tex_info_full(ex, r, h, storage, separate, out, &image);
+        if (!storage) vk_tmp_hl_seen(image);
         vk_exec_dc_read(image);
         if (ru_cap) ru_note_tex(h, image, storage);
         return;
@@ -345,6 +347,7 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
             td_stat[1]++;
         }
         *out = m->out;
+        vk_tmp_hl_seen(m->image);
         vk_exec_dc_read(m->image);
         if (ru_cap) ru_note_tex(h, m->image, 0);
         out->imageLayout = m->image && ex->nfbl && in_fbl(ex, m->image) ? VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT
@@ -365,6 +368,7 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
     uint64_t t0 = pd_on ? plat_cycles() : 0;
     tex_lock_once(locked);
     tex_info_full(ex, r, h, storage, separate, out, &image);
+    vk_tmp_hl_seen(image);
     vk_exec_dc_read(image);
     if (ru_cap) ru_note_tex(h, image, 0);
     if (pd_on) td_stat[4] += plat_cycles() - t0;
