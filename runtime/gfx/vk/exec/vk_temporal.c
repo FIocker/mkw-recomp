@@ -1040,11 +1040,16 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
     VkCommandBuffer cb = ex->cb;
     vk_exec_pass_end(ex);
     vk_exec_barrier(ex);
-    rec_drain();   // from here the calls are made at once, after everything queued before
+    // NGX and FFX call Vulkan through their own function pointers, while the replay's vkCmd* wrappers enqueue packets.
+    // Keep the whole temporal section direct: otherwise both threads record the same command buffer and command pool.
+    int rec_saved = rec_suspend();
     tmp_fence = ex->fence, tmp_cb = cb;
     int slot = (int)(T.frame % FG_SLOTS);
     Own *MV = &R.mvs[slot], *Z = &R.zs[slot];
-    if (!own_image(MV, w, h, VK_FORMAT_R16G16_SFLOAT) || !own_image(Z, w, h, VK_FORMAT_R32_SFLOAT)) return 0;
+    if (!own_image(MV, w, h, VK_FORMAT_R16G16_SFLOAT) || !own_image(Z, w, h, VK_FORMAT_R32_SFLOAT)) {
+        rec_resume(rec_saved);
+        return 0;
+    }
     VkImageView zview = game_view(&T.depth, VK_IMAGE_ASPECT_DEPTH_BIT), cview = game_view(color, VK_IMAGE_ASPECT_COLOR_BIT);
     // motion vectors
     {
@@ -1102,7 +1107,10 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
     int ok = 0;
     // the upscaler writes an image of its own, blitted into the game's target (any format, any usage)
     VkFormat of = VK_FORMAT_R16G16B16A16_SFLOAT;
-    if (!own_image(&R.outimg, ow, oh, of)) return 0;
+    if (!own_image(&R.outimg, ow, oh, of)) {
+        rec_resume(rec_saved);
+        return 0;
+    }
     float jx = T.debug == 3 ? 0.f : T.jx * T.jsign[0], jy = T.debug == 3 ? 0.f : T.jy * T.jsign[1];
     int reset_was = T.reset;
     if (T.debug == 1 || T.debug == 2) {
@@ -1197,7 +1205,7 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
         memcpy(FS[slot].cam, T.cam, sizeof T.cam);
         memcpy(FS[slot].m, m, sizeof m);
     }
-    rec_drain();
+    rec_resume(rec_saved);
     vk_exec_draw_forget();
     ex->dirty = VK_EXEC_DIRTY_ALL;
     ex->recorded += 8;
