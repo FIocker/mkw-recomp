@@ -57,7 +57,7 @@ static const char *const known[] = {
     "UPDATE_AS", "UPDATE_CHECK", "UPDATE_REPO", "WINDOW_SIZE", "ZSTD_CHECK", "ZSTD_NATIVE",
     // temporal upscaling and frame generation (gfx/vk/exec/vk_temporal.c), Reflex (gfx/vk/device/vk_reflex.c)
     "CAS", "CAS_SHARPNESS", "DLSSG_EXP", "DLSSG_DISABLE_BUF", "FG_LOG_EVERY", "NGX_LOG", "TEMPORAL_KART_CIRCLE", "TEMPORAL", "TEMPORAL_QUALITY", "TEMPORAL_SHARPNESS", "TEMPORAL_KART", "TEMPORAL_DEBUG", "TEMPORAL_JSIGN",
-    "TEMPORAL_HDR", "TEMPORAL_NGX", "DLSS_PRESET", "FG_ENGINE", "REFLEX", "FG_HUD", "FG_HUDLESS", "HL_TRACE", "FG_FLIP_THREAD", "FG_QUEUE", "FG_AB", "FG_TEST", "FG_QUEUE_PRIO", "TEMPORAL_KART_DEPTH",
+    "TEMPORAL_HDR", "TEMPORAL_NGX", "DLSS_PRESET", "FG_ENGINE", "REFLEX", "FG_HUD", "FG_HUDLESS", "HL_TRACE", "FG_FLIP_THREAD", "FG_QUEUE", "FG_AB", "FG_TEST", "FG_QUEUE_PRIO", "TEMPORAL_KART_DEPTH", "VSYNC_LOCK", "FG_XWAIT", "FG_LOAD", "FG_OCCUPANCY", "PHASE_LOCK", "FG_VBLANK", "FG_MAILBOX",
 };
 
 // The mkw.ini section a key cfg_set may write goes to when the file lacks it (mkw.ini.example's sections).

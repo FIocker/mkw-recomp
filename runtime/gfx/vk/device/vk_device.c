@@ -251,6 +251,8 @@ typedef struct {
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pexe;
     VkPhysicalDevicePresentIdFeaturesKHR presentid;
     VkPhysicalDeviceOpticalFlowFeaturesNV oflow;
+    VkPhysicalDeviceComputeOccupancyPriorityFeaturesNV occ;
+    VkPhysicalDevicePresentWaitFeaturesKHR pwait;
 } FeatureChain;
 
 static int create_device(void) {
@@ -359,6 +361,12 @@ static int create_device(void) {
         if (!strcmp(ep[i].extensionName, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) && n_ext < 46)
             g_vk.low_latency2_spec = ep[i].specVersion, ext[n_ext++] = VK_NV_LOW_LATENCY_2_EXTENSION_NAME;
     OPTIONAL_EXT(has_present_id, VK_KHR_PRESENT_ID_EXTENSION_NAME, presentid, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR);
+    if (g_vk.has_present_id)   // when each present reached the display: the vblank phase (gfx_present.c)
+        OPTIONAL_EXT(has_present_wait, VK_KHR_PRESENT_WAIT_EXTENSION_NAME, pwait,
+                     VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR);
+    // frame generation's compute at a lower SM occupancy beside the game's work (vk_framegen.c, MKW_FG_OCCUPANCY)
+    OPTIONAL_EXT(has_occupancy, VK_NV_COMPUTE_OCCUPANCY_PRIORITY_EXTENSION_NAME, occ,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_OCCUPANCY_PRIORITY_FEATURES_NV);
     free(ep);
 
     // The driver fills the chain with what it supports; the same chain then enables all of it (robustBufferAccess
@@ -394,6 +402,8 @@ static int create_device(void) {
     else if (!h->textureCompressionBC) miss = "textureCompressionBC";
     if (miss) { rt_log("vk: required feature missing on %s: %s", g_vk.props.deviceName, miss); free(c); return 0; }
     if (g_vk.has_present_id && !c->presentid.presentId) g_vk.has_present_id = 0;
+    if (g_vk.has_occupancy && !c->occ.computeOccupancyPriority) g_vk.has_occupancy = 0;
+    if (g_vk.has_present_wait && (!c->pwait.presentWait || !g_vk.has_present_id)) g_vk.has_present_wait = 0;
     g_vk.has_buffer_device_address = c->f12.bufferDeviceAddress;
     g_vk.has_placed = has_placed && c->placed.memoryMapPlaced && c->placed.memoryUnmapReserve;
     c->placed.memoryMapRangePlaced = VK_FALSE;   // whole allocations only

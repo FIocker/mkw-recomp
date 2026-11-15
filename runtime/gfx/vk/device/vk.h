@@ -59,6 +59,8 @@ typedef struct VkCtx {
     // VK_FEEDBACK_RESTART (the pass ends and restarts behind the full barrier).
     int feedback;                           // VK_FEEDBACK_*
     uint32_t min_imported_host_alignment;   // VK_EXT_external_memory_host
+    int has_occupancy;
+    int has_present_wait;                   // VK_KHR_present_wait (gfx_present.c: the display's vblank phase)                      // VK_NV_compute_occupancy_priority (frame generation's compute)
     int has_present_id;                     // VK_KHR_present_id with presentId: Reflex's markers name the presents
     uint32_t low_latency2_spec;             // VK_NV_low_latency2's revision when enabled (Reflex, vk_latency.c), else 0
     int device_index;                       // index in vkEnumeratePhysicalDevices
@@ -124,7 +126,9 @@ double vk_present_refresh_hz(void);   // the window's monitor, 0 unknown
 extern uint64_t vk_fg_game_frame;   // the game frame the present thread makes frames for (vk_framegen.c)
 extern VkFormat vk_fg_src_format, vk_fg_out_format;   // its picture's format, and the format of the frames handed out
 VkQueue vk_fg_queue(void);   // the queue frame generation's frames are written on (their blits go there), 0: the game's
-void vk_present_queue(VkQueue q);   // gfx_present.c: the queue of the blits that follow (0: the game's)
+void vk_present_queue(VkQueue q);
+uint64_t vk_present_game_id(uint64_t frame);
+uint64_t vk_present_flip_time(uint64_t t);   // a flip's call time on the vblank clock, not before t (0: unknown)   // the present id of a game frame's present (0 none): Reflex's, or for the phase   // gfx_present.c: the queue of the blits that follow (0: the game's)
 int vk_fg_wanted(void);   // MKW_FRAMEGEN is not off: the swapchain keeps spare images for it
 // One game frame: copies the crop rectangle {x, y, w, h} of src (GENERAL, all its writes submitted) into a picture of
 // its own and submits the frames made between the last game frame and it. out: what to show, in order (the made

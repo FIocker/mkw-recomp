@@ -1012,6 +1012,29 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
     VkCommandBuffer xcb = F.split ? F.xcb[slot] : VK_NULL_HANDLE;
     if (xcb) vkResetCommandBuffer(xcb, 0), vkBeginCommandBuffer(xcb, &bi);
     F.rec_x = xcb;
+    // MKW_FG_OCCUPANCY="priority,throttling" (VK_NV_compute_occupancy_priority; "off"): the generation's compute
+    // takes fewer of the GPU's SMs beside the game's work. The game waits for its GPU work inside its frame, and a
+    // generation of 2.5 ms beside it pushed game frames past 20 ms in proportion to its GPU time (a synthetic load
+    // of the same length did too: flow-load3, 15/11/2026)
+    if (c->has_occupancy) {
+        static PFN_vkCmdSetComputeOccupancyPriorityNV setocc;
+        static float op = -1, ot;
+        static int ab;   // "ab:priority,throttling": in the MKW_AB blocks B only
+        if (op < 0) {
+            const char *e = cfg_get("MKW_FG_OCCUPANCY");
+            op = 0.25f, ot = 0.0f;
+            if (e && !strncmp(e, "ab:", 3)) ab = 1, e += 3;
+            if (e && !strcmp(e, "off")) op = 0;
+            else if (e) sscanf(e, "%f,%f", &op, &ot);
+            setocc = (PFN_vkCmdSetComputeOccupancyPriorityNV)vkGetDeviceProcAddr(c->device, "vkCmdSetComputeOccupancyPriorityNV");
+            rt_log("vk: frame generation's compute occupancy priority %.2f, throttling %.2f%s", op, ot, setocc ? "" : " (no entry point)");
+        }
+        if (setocc && op > 0 && (!ab || rt_ab())) {
+            VkComputeOccupancyPriorityParametersNV pp = {.sType = VK_STRUCTURE_TYPE_COMPUTE_OCCUPANCY_PRIORITY_PARAMETERS_NV,
+                                                         .occupancyPriority = op, .occupancyThrottling = ot};
+            setocc(cb, &pp);
+        }
+    }
     int n = vk_fg_record(cb, src, sw, sh, crop, m - 1, out, w, h);
     F.rec_x = VK_NULL_HANDLE;
     if (xcb) vkEndCommandBuffer(xcb);
@@ -1036,7 +1059,9 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
                                     .value = F.xval + 1, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT},
                               fs = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = F.fsem,
                                     .value = F.fval + 1, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
-        VkSubmitInfo2 xsi = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = F.fval ? 1u : 0u,
+        static int xwait = -1;   // MKW_FG_XWAIT=0 (measuring only, unsafe): the copies do not wait for the last generation
+        if (xwait < 0) xwait = !(cfg_get("MKW_FG_XWAIT") && !strcmp(cfg_get("MKW_FG_XWAIT"), "0"));
+        VkSubmitInfo2 xsi = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = F.fval && xwait ? 1u : 0u,
                              .pWaitSemaphoreInfos = &xw, .commandBufferInfoCount = 1, .pCommandBufferInfos = &xi,
                              .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &xs};
         VkSemaphoreSubmitInfo waits[2] = {fw};

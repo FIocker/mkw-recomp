@@ -84,18 +84,34 @@ static void flip_main(void *arg) {
         FlipJob f = fl_q[fl_head];
         plat_mutex_unlock(&fl_m);
         uint64_t t0 = kern_now_ns();
+        // On the vblank clock (gfx_present.c, from the presents' display times), each flip half a refresh before its
+        // own vblank, one vblank after the other: placed one step apart by the clock alone, the made frame and the
+        // game's fell into one refresh now and then (one dropped by the mailbox: 493 of 5128, pl-dg 15/11/2026).
+        // The first at the display time (or now, when that has passed); without a vblank clock, one step apart.
+        static int on_clock = -1;
+        if (on_clock < 0) on_clock = !(cfg_get("MKW_FG_VBLANK") && !strcmp(cfg_get("MKW_FG_VBLANK"), "0"));
+        uint64_t at = on_clock ? vk_present_flip_time(f.first > t0 ? f.first : t0) : 0;
         for (int k = 1; k < f.nf; k++) {
-            wait_until(f.first + (uint64_t)(k - 1) * f.step);
+            if (at) {
+                uint64_t now = kern_now_ns();
+                if (at < now) at = vk_present_flip_time(now);   // (late: the next refresh)
+                wait_until(at);
+                at = vk_present_flip_time(at + 1);   // the next vblank's
+            } else {
+                wait_until(f.first + (uint64_t)(k - 1) * f.step);
+            }
             vk_present_flip();
             plat_mutex_lock(&fl_m);
             fl_images--;
             plat_cond_broadcast(&fl_cv);
             plat_mutex_unlock(&fl_m);
         }
-        uint64_t target = f.first + (uint64_t)(f.nf - 1) * f.step;
+        uint64_t target = at ? at : f.first + (uint64_t)(f.nf - 1) * f.step;
+        if (at && target < kern_now_ns()) target = vk_present_flip_time(kern_now_ns());
         wait_until(target);
         uint64_t t1 = kern_now_ns();
         uint64_t pid = vk_lat_present_start(f.frame);   // Reflex: the game frame's present carries its id
+        if (!pid) pid = vk_present_game_id(f.frame);   // (or the vblank phase's measure does)
         vk_present_flip_id(pid);
         vk_lat_present_end(pid);
         trace_present(f.frame, t1, t0, target, f.queued, f.nf - 1);
@@ -191,9 +207,18 @@ static void present_main(void *arg) {
             vk_present_flip();
         }
         uint64_t target = nf ? first + (uint64_t)(nf - 1) * step : j.at;
+        // the game's frame alone: half a refresh before a vblank on the vblank clock (gfx_present.c), so with the tick
+        // locked to the display its phase cannot sit on a vblank for the session (MKW_FG_VBLANK=0: at its time)
+        static int clock_on = -1;
+        if (clock_on < 0) clock_on = !(cfg_get("MKW_FG_VBLANK") && !strcmp(cfg_get("MKW_FG_VBLANK"), "0"));
+        if (!nf && clock_on) {
+            uint64_t q = vk_present_flip_time(target);
+            if (q) target = q;
+        }
         wait_until(target);
         uint64_t t1 = kern_now_ns();
         uint64_t pid = vk_lat_present_start(j.frame);   // Reflex: the game frame's present carries its id
+        if (!pid) pid = vk_present_game_id(j.frame);   // (or the vblank phase's measure does)
         vk_present_flip_id(pid);
         vk_lat_present_end(pid);
         // MKW_TRACE=present: one line per present: the host present's interval, the interval of the game's present

@@ -651,9 +651,10 @@ NVN_API(nvnWindowSetCrop) {
 // ---------- Present pacing
 // The vsync thread ticks at a fixed 60 Hz whatever the monitor does, so one game frame lasts `interval` ticks; the turbo
 // (core/hacks/turbo.c) makes them `turbo_speed` times shorter.
-#define VSYNC_HZ 60ull
+uint64_t gfx_vsync_tick_ns(void);   // gfx_present.c: 60 Hz, or locked to the display's refresh
+int64_t gfx_pace_nudge_take(void);   // gfx_present.c: a move of the present phase to make, once
 static uint64_t present_period(const win_t *o) {
-    return (o->interval > 0 ? (uint64_t)o->interval : 1ull) * 1000000000ull / VSYNC_HZ / (uint64_t)turbo_speed();
+    return (o->interval > 0 ? (uint64_t)o->interval : 1ull) * gfx_vsync_tick_ns() / (uint64_t)turbo_speed();
 }
 
 // MacNativeGames nvn_pace.h: the present slot is the previous slot plus one period. Early: wait for the slot. Late by
@@ -785,6 +786,7 @@ NVN_API(nvnQueuePresentTexture) {
     if (rt_trace & RT_TRACE_PERF) nvn_sync_wait_window();
     const tex_t *t = (const tex_t *)o->tex[idx];
     uint64_t period = present_period(o), now = kern_now_ns();
+    if (o->pace) o->pace += (uint64_t)gfx_pace_nudge_take();   // the vblank phase moved (gfx_present.c)
     uint64_t slot = now + pace(&o->pace, now, period);
     gfx_backend()->present(t, o->crop, slot);
     o->ticket[idx] = o->presents;
