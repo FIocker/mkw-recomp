@@ -259,6 +259,9 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
     if (!FG.ctx) {
         ffxCreateContextDescFrameGeneration d = {};
         d.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+        ffxCreateContextDescFrameGenerationVersion api = {};
+        api.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION;
+        api.version = FFX_FRAMEGENERATION_VERSION;
         int hdr = bb->fmt != VK_FORMAT_R8G8B8A8_UNORM && bb->fmt != VK_FORMAT_R8G8B8A8_SRGB;
         d.flags = hdr ? FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE : 0;
         if (display_mv) d.flags |= FFX_FRAMEGENERATION_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS;
@@ -270,13 +273,16 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
         if (A.legacy) {
             old.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_DEPRECATED;
             old.vkDevice = c->device, old.vkPhysicalDevice = c->phys, old.vkDeviceProcAddr = vkGetDeviceProcAddr;
-            d.header.pNext = &old.header;
+            api.header.pNext = &old.header;
         } else {
             be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
             be.deviceContext.vkDevice = c->device, be.deviceContext.vkPhysicalDevice = c->phys;
             be.deviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
-            d.header.pNext = &be.header;
+            api.header.pNext = &be.header;
         }
+        // SDK 2.1+ requires the application API version in the creation chain for new frame-generation APIs.
+        // Keep the backend chained after it so PrepareV2's camera data is interpreted under the declared contract.
+        d.header.pNext = &api.header;
         // under the queue lock, and finished before it is let go: FFX's backend may submit its own setup work to the
         // device's queue while it makes the context (two runs faulted on a write to address 0 at the first frame)
         vk_queue_lock();
