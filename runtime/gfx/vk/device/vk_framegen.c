@@ -304,7 +304,7 @@ static int ensure_fsr_motion(VkCtx *c, int w, int h) {
     vk_queue_unlock();
     free_img(c, &F.fsr_mv);
     F.mv_w = F.mv_h = 0;
-    if (!make_img(c, &F.fsr_mv, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16_SFLOAT, 0)) return 0;
+    if (!make_img(c, &F.fsr_mv, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return 0;
     F.mv_w = w, F.mv_h = h;
     return 1;
 }
@@ -488,8 +488,11 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     static int flow_mv_mode = -1;
     if (flow_mv_mode < 0) flow_mv_mode = rt_knob("FG_FLOW_MV", "0");
     int flow_mv = eng == 2 && RT_KNOB_ON(flow_mv_mode);
+    static int zero_mv_mode = -1;
+    if (zero_mv_mode < 0) zero_mv_mode = rt_knob("FG_ZERO_MV", "0");
+    int zero_mv = eng == 2 && RT_KNOB_ON(zero_mv_mode);   // diagnostic: isolate game vectors from SDK optical flow
     VkTmpFgInputs fgin = {0};
-    int have_fgin = made && flow_mv && vk_tmp_fg_inputs(vk_fg_game_frame, &fgin);
+    int have_fgin = made && (flow_mv || zero_mv) && vk_tmp_fg_inputs(vk_fg_game_frame, &fgin);
     int mv_ready = 0;
     if (have_fgin && !fgin.reset && ensure_fsr_motion(c, (int)fgin.w, (int)fgin.h)) {
         img_barrier(cb, F.fsr_mv.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0,
@@ -499,7 +502,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
         mv_ready = 1;
     }
     int flow_ready = 0;
-    if (made && (eng == 0 || mv_ready || compare_native)) {
+    if (made && (eng == 0 || (mv_ready && !zero_mv) || compare_native)) {
         const float pc16[4] = {16, F.lambda, F.bias, 0}, pc4[4] = {4, F.lambda, F.bias, 0}, pc1[4] = {1, F.lambda, F.bias, 0};
         pass(cb, F.coarse, &F.le[prev], &F.le[cur], NULL, &F.fl[0], pc16, (gw + 1) / 2, (gh + 1) / 2);
         pass(cb, F.median, &F.fl[0], NULL, NULL, &F.fl[1], level, (gw + 1) / 2, (gh + 1) / 2);
@@ -584,10 +587,17 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             VkTmpFgInputs in;
             if (have_fgin || vk_tmp_fg_inputs(vk_fg_game_frame, &in)) {
                 if (have_fgin) in = fgin;
-                if (mv_ready && flow_ready && !in.reset) {
-                    const float jx = F.have_jitter ? in.jx - F.last_jx : 0.f;
-                    const float jy = F.have_jitter ? in.jy - F.last_jy : 0.f;
-                    const float pc[8] = {(float)in.w, (float)in.h, (float)cw, (float)ch, (float)gw, (float)gh, jx, jy};
+                if (mv_ready && zero_mv) {
+                    VkClearColorValue zero = {.float32 = {0.f, 0.f, 0.f, 0.f}};
+                    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    vkCmdClearColorImage(cb, F.fsr_mv.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+                    mem_barrier(cb);
+                    in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
+                } else if (mv_ready && flow_ready && !in.reset) {
+                    static int still_mode = -1;
+                    if (still_mode < 0) still_mode = rt_knob("FG_STILL_MV", "0");
+                    const float pc[8] = {(float)in.w, (float)in.h, (float)cw, (float)ch, (float)gw, (float)gh,
+                                         RT_KNOB_ON(still_mode) ? 1.f : 0.f, 0.f};
                     fsr_motion_pass(cb, &in, &F.pic[cur], &F.pic[prev], &F.fl[5], &F.fsr_mv, pc, in.w, in.h);
                     in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
                 }
@@ -703,7 +713,8 @@ static struct {
     VmaAllocation alloc;
     void *map;
     VkDeviceSize size;
-    int n[DUMP_N], hl[DUMP_N], ref[DUMP_N], w, h;
+    int n[DUMP_N], hl[DUMP_N], ref[DUMP_N], depth[DUMP_N], w, h;
+    float near_[DUMP_N], far_[DUMP_N];
 } D;
 
 static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int h, VkImage native_ref) {
@@ -711,7 +722,7 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
         const char *e = cfg_get("MKW_FG_DUMP");
         D.at = e && atoll(e) > 0 ? (uint64_t)atoll(e) : UINT64_MAX;
     }
-    VkDeviceSize part = (VkDeviceSize)w * h * 16;
+    VkDeviceSize part = (VkDeviceSize)w * h * 20;
     if (F.frames < D.at || F.frames >= D.at + DUMP_N || (D.buf && (D.w != w || D.h != h))) return 0;
     VkCtx *c = vk_ctx();
     if (!D.buf) {
@@ -738,6 +749,21 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
     D.ref[k] = native_ref != VK_NULL_HANDLE;
     bc.bufferOffset = base + (VkDeviceSize)w * h * 12;
     if (D.ref[k]) vkCmdCopyImageToBuffer(cb, native_ref, VK_IMAGE_LAYOUT_GENERAL, D.buf, 1, &bc);
+    VkTmpFgInputs in;
+    D.depth[k] = vk_tmp_fg_inputs(vk_fg_game_frame, &in);
+    if (D.depth[k]) {
+        D.near_[k] = in.near_, D.far_[k] = in.far_;
+        // Sparse raw depth samples distinguish an incorrect foreground depth from a bad motion vector. No image
+        // conversion: the SDK's actual R32 values, in a fifth readback plane used only by this diagnostic.
+        const float xy[9][2] = {{.5f,.3f},{.5f,.55f},{.5f,.7f},{.4f,.8f},{.6f,.8f},{.5f,.9f},{.25f,.8f},{.75f,.8f},{.5f,.98f}};
+        VkBufferImageCopy samples[9];
+        for (int j = 0; j < 9; j++) {
+            samples[j] = (VkBufferImageCopy){.bufferOffset = base + (VkDeviceSize)w * h * 16 + (VkDeviceSize)j * 4,
+                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                .imageOffset = {(int32_t)(xy[j][0] * in.w), (int32_t)(xy[j][1] * in.h), 0}, .imageExtent = {1,1,1}};
+        }
+        vkCmdCopyImageToBuffer(cb, in.depth, VK_IMAGE_LAYOUT_GENERAL, D.buf, 9, samples);
+    }
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
                            .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
@@ -757,8 +783,13 @@ static void dump_write(VkFence fence) {
         for (int k = 0; k < 4; k++) {
             if (!D.n[f] || (k == 1 && D.n[f] < 2) || (k == 2 && !D.hl[f]) || (k == 3 && !D.ref[f])) continue;
             snprintf(path, sizeof path, "%s/%c%llu.png", dir, "gmhr"[k], (unsigned long long)(D.at + (uint64_t)f));
-            rt_write_png(path, (const uint8_t *)D.map + px * 4 * (size_t)f + px * (size_t)k, (uint32_t)D.w, (uint32_t)D.h);
+            rt_write_png(path, (const uint8_t *)D.map + px * 5 * (size_t)f + px * (size_t)k, (uint32_t)D.w, (uint32_t)D.h);
         }
+    for (int f = 0; f < DUMP_N; f++) if (D.depth[f]) {
+        const float *z = (const float *)((const uint8_t *)D.map + px * 5 * (size_t)f + px * 4);
+        rt_log("fg depth: frame %llu near %.8g far %.8g, samples %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g",
+               (unsigned long long)(D.at + f), D.near_[f], D.far_[f], z[0],z[1],z[2],z[3],z[4],z[5],z[6],z[7],z[8]);
+    }
     rt_log("vk: frame generation: game frames %llu-%llu written to %s (interval %.1f ms)", (unsigned long long)D.at,
            (unsigned long long)(D.at + DUMP_N - 1), dir, F.interval / 1e6);
 }
