@@ -422,6 +422,57 @@ msgstr ""
 "게임 자체 프레임 사이에 만든 프레임을 표시합니다. 2x는 30fps를 60fps로 만듭니다. 「자동」은 모니터의 주사율이 허용하는 만큼 생성합니다. 최대 1프레임의 지연이 "
 "생기며, 빠른 움직임이 번져 보일 수 있습니다. 콘솔에는 없는 기능입니다."
 
+msgctxt "UI_MENU_FG_ENGINE"
+msgid "Frame generation by"
+msgstr ""
+
+msgctxt "UI_MENU_FG_ENGINE_DESC"
+msgid ""
+"Who makes the frames between the game's own. The port's own works everywhere. NVIDIA DLSS Frame "
+"Generation (RTX 40 and 50) and AMD FSR 3.1 use the scene's depth and motion and need DLSS or FSR "
+"3.1 upscaling on."
+msgstr ""
+
+msgctxt "UI_MENU_REFLEX"
+msgid "NVIDIA Reflex"
+msgstr ""
+
+msgctxt "UI_MENU_REFLEX_DESC"
+msgid ""
+"Starts each frame as late as the GPU allows, so what you press reaches the screen sooner. Boost "
+"also keeps the GPU's clocks up. NVIDIA GPUs only."
+msgstr ""
+
+msgctxt "UI_MENU_TEMPORAL"
+msgid "AI upscaling"
+msgstr ""
+
+msgctxt "UI_MENU_TEMPORAL_DESC"
+msgid ""
+"Renders the race at a lower resolution and rebuilds it from several frames: NVIDIA DLSS (RTX "
+"GPUs) or AMD FSR 3.1 (any GPU). Sharper and steadier edges than the game's own scaling; the HUD "
+"stays sharp."
+msgstr ""
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY"
+msgid "Upscaling quality"
+msgstr ""
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY_DESC"
+msgid ""
+"The share of the screen's resolution the race renders at: Native (DLAA) 100 %, Quality 67 %, "
+"Balanced 58 %, Performance 50 %, Ultra performance 33 %. Applies at the next start."
+msgstr ""
+
+msgctxt "UI_MENU_DLSS_PRESET"
+msgid "DLSS model"
+msgstr ""
+
+msgctxt "UI_MENU_DLSS_PRESET_DESC"
+msgid ""
+"NVIDIA's model DLSS uses: the default of the DLSS version next to the game, or presets J, K, L, M."
+msgstr ""
+
 msgctxt "UI_MENU_GRAPHICS"
 msgid "Picture"
 msgstr "화질"

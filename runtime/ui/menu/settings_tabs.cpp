@@ -166,6 +166,28 @@ static void tab_screen(float scale) {
         const char *names[5] = {menu_text(UI_MENU_PERF_OFF), menu_text(UI_MENU_FPS_AUTO), "2x", "3x", "4x"};
         opt_choice_list("MKW_FRAMEGEN", UI_MENU_FRAMEGEN, vals, names, 5, UI_MENU_FRAMEGEN_DESC);
     }
+    {   // who makes those frames (gfx/vk/device/vk_framegen.c, gfx/vk/exec/vk_temporal.c), live
+        static const char *const vals[] = {"flow", "dlss", "fsr3"};
+        const char *names[3] = {"MKW Recomp", "NVIDIA DLSS", "AMD FSR 3.1"};
+        opt_choice_list("MKW_FG_ENGINE", UI_MENU_FG_ENGINE, vals, names, 3, UI_MENU_FG_ENGINE_DESC);
+    }
+    {   // NVIDIA Reflex (gfx/vk/device/vk_latency.c), live
+        static const char *const vals[] = {"off", "on", "boost"};
+        const char *names[3] = {menu_text(UI_MENU_PERF_OFF), "On", "On + Boost"};
+        opt_choice_list("MKW_REFLEX", UI_MENU_REFLEX, vals, names, 3, UI_MENU_REFLEX_DESC);
+    }
+    {   // DLSS or FSR 3.1 in the place of the game's upscale (gfx/vk/exec/vk_temporal.c): the engine live, the quality
+        // at the next start
+        static const char *const vals[] = {"off", "dlss", "fsr3"};
+        const char *names[3] = {menu_text(UI_MENU_PERF_OFF), "NVIDIA DLSS", "AMD FSR 3.1"};
+        opt_choice_list("MKW_TEMPORAL", UI_MENU_TEMPORAL, vals, names, 3, UI_MENU_TEMPORAL_DESC);
+        static const char *const qv[] = {"native", "quality", "balanced", "performance", "ultra"};
+        const char *qn[5] = {"Native (DLAA)", "Quality", "Balanced", "Performance", "Ultra performance"};
+        opt_choice_list("MKW_TEMPORAL_QUALITY", UI_MENU_TEMPORAL_QUALITY, qv, qn, 5, UI_MENU_TEMPORAL_QUALITY_DESC);
+        static const char *const pv[] = {"default", "j", "k", "l", "m"};
+        const char *pn[5] = {"Default", "J", "K", "L", "M"};
+        opt_choice_list("MKW_DLSS_PRESET", UI_MENU_DLSS_PRESET, pv, pn, 5, UI_MENU_DLSS_PRESET_DESC);
+    }
     opt_group(UI_MENU_GRAPHICS);
     static const UiTextId fit[] = {UI_MENU_PICTURE_FIT_KEEP, UI_MENU_PICTURE_FIT_STRETCH};
     opt_choice("MKW_PICTURE_FIT", UI_MENU_PICTURE_FIT, fit, 2, UI_MENU_PICTURE_FIT_DESC);

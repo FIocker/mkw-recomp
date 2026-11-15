@@ -32,6 +32,11 @@ typedef enum {
     UI_PERF_LINE_FPS_FG,   // the same with frame generation on: game frames / frames shown
     UI_MENU_FPS, UI_MENU_FPS_DESC, UI_MENU_FPS_AUTO,
     UI_MENU_FRAMEGEN, UI_MENU_FRAMEGEN_DESC,   // values: UI_MENU_PERF_OFF, UI_MENU_FPS_AUTO, 2x..4x
+    UI_MENU_FG_ENGINE, UI_MENU_FG_ENGINE_DESC,   // values: the port's own, DLSS Frame Generation, FSR 3.1
+    UI_MENU_REFLEX, UI_MENU_REFLEX_DESC,         // values: off, on, on + boost
+    UI_MENU_TEMPORAL, UI_MENU_TEMPORAL_DESC,     // values: off (the game's own), DLSS, FSR 3.1
+    UI_MENU_TEMPORAL_QUALITY, UI_MENU_TEMPORAL_QUALITY_DESC,
+    UI_MENU_DLSS_PRESET, UI_MENU_DLSS_PRESET_DESC,
     UI_MENU_GRAPHICS,         // group heading over the picture rows
     UI_MENU_UPSCALER, UI_MENU_UPSCALER_DESC, UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR,
     UI_MENU_PICTURE_FIT, UI_MENU_PICTURE_FIT_DESC, UI_MENU_PICTURE_FIT_KEEP, UI_MENU_PICTURE_FIT_STRETCH,

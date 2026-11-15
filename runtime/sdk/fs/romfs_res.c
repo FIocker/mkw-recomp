@@ -190,6 +190,7 @@ static const char *write_overlay(int lines, uint32_t r3d, float lod) {
 }
 
 static int g_lines;   // romfs_resolution_lines
+static int g_scene_pm = 1000;   // romfs_resolution_scene_permille
 
 const char *romfs_resolution_overlay(void) {
     const char *v = cfg_value("MKW_RESOLUTION");
@@ -210,9 +211,13 @@ const char *romfs_resolution_overlay(void) {
     }
     if (!lines && lod <= 0) return NULL;
     const char *dir = write_overlay(lines, r3d, lod);
+    if (dir && pm) g_scene_pm = pm;
     if (dir && lines) g_lines = lines;
     return dir;
 }
 
 void romfs_resolution_external(void) { g_lines = -1; }
 int romfs_resolution_lines(void) { return g_lines; }
+// The 3D scene's share of the screen's lines this run, in thousandths (1000: the same, the game's own SMAA writes the
+// screen; less: the game's upscale dispatch follows), as the overlay written at start says (vk_temporal.c).
+int romfs_resolution_scene_permille(void) { return g_scene_pm; }

@@ -478,6 +478,7 @@ static void capture_camera(VkExec *ex) {
 }
 
 static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_draw);
+int romfs_resolution_scene_permille(void);   // sdk/fs/romfs_res.c
 static void trace_hash(const char *what, uint64_t h, const VkExec *ex);
 
 int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
@@ -518,7 +519,7 @@ int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     if (!T.cam_ok) return 1;
     // native: is this the screen target? The screen target is the one the HUD draws into, of the screen's size; the
     // blend into a target of the scene's size followed by the upscale dispatch is told apart by MKW_TEMPORAL_QUALITY.
-    if (vk_tmp_scene_permille() < 1000) return 1;
+    if (romfs_resolution_scene_permille() < 1000) return 1;
     Img out = {ex->color[0].image, ex->color[0].format, VK_IMAGE_ASPECT_COLOR_BIT,
                ex->color[0].img ? ex->color[0].img->usage : 0, ex->color[0].width, ex->color[0].height, NULL};
     return run_upscaler(ex, &pre, &out, 1) ? 0 : 1;
