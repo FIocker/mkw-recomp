@@ -382,7 +382,9 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     int eng = !strcmp(cfg_value("MKW_FG_ENGINE"), "dlss") ? 1 : !strcmp(cfg_value("MKW_FG_ENGINE"), "fsr3") ? 2 : 0;
     // FSR interpolation can use the native flow's object motion too. MKW_FG_FLOW_MV is the A/B switch while its
     // confidence gates are tuned; off by default until the hardware comparison.
-    int flow_mv = eng == 2 && knob("MKW_FG_FLOW_MV", 0.f) > 0.f;
+    static int flow_mv_mode = -1;
+    if (flow_mv_mode < 0) flow_mv_mode = rt_knob("FG_FLOW_MV", "0");
+    int flow_mv = eng == 2 && RT_KNOB_ON(flow_mv_mode);
     VkTmpFgInputs fgin = {0};
     int have_fgin = made && flow_mv && vk_tmp_fg_inputs(vk_fg_game_frame, &fgin);
     int mv_ready = 0;
