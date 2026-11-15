@@ -207,6 +207,13 @@ int probe_fsr_fg(void) {
     for (int i = 0; i < 4; i++) { vkDestroyImageView(c->device,views[i],NULL); vmaDestroyImage(c->vma,images[i],allocations[i]); }
     vmaDestroyBuffer(c->vma,staging,memory);
     rec_resume(recording);
+    // The standalone validation harness disables the game's preallocated pools and requests full device teardown.
+    // Leaving a live device for validation DLL detach can stall process exit after the measured result is printed.
+    const char *shutdown = cfg_get("MKW_FSR_PROBE_SHUTDOWN");
+    if (shutdown && strcmp(shutdown,"0")) {
+        vk_shutdown();
+        if (vk_validation_errors_total()) ok = 0;
+    }
     printf("probe-fsr-fg: %s (quality metrics above remain separate from this integration check)\n",ok?"passed":"FAILED");
     return ok ? 0 : 1;
 }

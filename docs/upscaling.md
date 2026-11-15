@@ -61,6 +61,9 @@ also supply FSR upscaling through this override.
 On supported devices that explicit override also enables `VK_KHR_compute_shader_derivatives`: current DXC emits linear
 compute-quad operations for the SDK's SPD shaders. The RTX 5080 reports both linear and quad support. Validation must be
 confirmed active in the log; an elevated Windows loader ignores `VK_LAYER_PATH` and needs explicit layer registration.
+The standalone provider harness uses `MKW_PROBE_NO_NGX=1`, `MKW_VK_TEX_POOL_MIN=0`, and `MKW_VRAM_HEADROOM=0` to avoid
+initializing unrelated NGX state and game memory pools. `MKW_FSR_PROBE_SHUTDOWN=1` then tears down the device explicitly,
+which avoids validation-loader teardown stalls and is separate from the measured interpolation result.
 
 Experimental motion controls default off: `MKW_FG_NVOF` uses the Vulkan hardware optical-flow queue on supported NVIDIA
 devices; `MKW_FG_NVOF_GRID=1|2|4` changes its vector grid (default 4). `MKW_FG_NVOF_GEOMETRY`, `MKW_FG_NVOF_REFINE`, and

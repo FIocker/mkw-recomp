@@ -1422,7 +1422,9 @@ void vk_tmp_present(uint64_t frame) {
 
 void vk_tmp_device_init(void) {
     vk_usnap_host_wanted = 1;   // the camera block is read from the submission's own copy (vk_usnap_peek)
-    ngx_init();
+    // Asset-free FSR/OFA probes can isolate their provider and device teardown from unrelated NGX initialization.
+    const char *no_ngx = cfg_get("MKW_PROBE_NO_NGX");
+    if (!(no_ngx && strcmp(no_ngx,"0"))) ngx_init();
     read_cfg();
 }
 
