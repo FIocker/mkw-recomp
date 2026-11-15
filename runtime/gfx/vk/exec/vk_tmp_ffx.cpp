@@ -163,10 +163,20 @@ extern "C" int vk_tmp_ffx_load(void) {
     while (n && path[n - 1] != '\\') n--;
     static const char *const names[] = {"amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_vk.dll"};
     HMODULE m = nullptr;
-    for (int i = 0; i < 2 && !m; i++) {
-        snprintf(path + n, MAX_PATH - n, "%s", names[i]);
+    const char *override = cfg_get("MKW_FFX_LIBRARY");
+    if (override && *override) {
+        // Isolated source-provider experiments must not replace the player's signed DLLs. Explicit override uses
+        // the current backend descriptor; an invalid path fails visibly instead of silently testing the stock DLL.
+        snprintf(path, sizeof path, "%s", override);
         m = LoadLibraryA(path);
-        A.legacy = i == 1;
+        A.legacy = 0;
+        if (!m) rt_log("ffx: explicit diagnostic library %s could not be loaded (%lu)", path, GetLastError());
+    } else {
+        for (int i = 0; i < 2 && !m; i++) {
+            snprintf(path + n, MAX_PATH - n, "%s", names[i]);
+            m = LoadLibraryA(path);
+            A.legacy = i == 1;
+        }
     }
     if (!m) {
         rt_log("ffx: neither amd_fidelityfx_loader_vk.dll nor amd_fidelityfx_vk.dll next to mkw.exe: FSR 3.1 unavailable");
