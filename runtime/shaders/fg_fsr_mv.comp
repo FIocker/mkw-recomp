@@ -57,7 +57,7 @@ void main() {
     vec2 camera = texelFetch(camera_mv, px, 0).xy;
     float camera_error = match_error(px, camera, image_size);
     float depth = texelFetch(depth_tex, px, 0).r;
-    ivec2 block = px / 16;
+    ivec2 block = output_pixel(px) / 16;
     // The 5x5 cells include the three-by-three support neighbourhood of every candidate tried below.
     vec2 cell[25];
     for (int y = -2; y <= 2; y++) {
