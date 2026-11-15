@@ -221,12 +221,41 @@ static int listed(const char *const *list, uint32_t n, const char *s) {
     return 0;
 }
 
+// NVSDK_NGX_FeatureDiscoveryInfo with an application id (the SDK struct's 64-bit layout), for the instance extensions
+// DLSS Frame Generation wants
+typedef struct {
+    int sdk, feature;
+    struct { int type; union { struct { const char *id; int engine; const char *ver; } project; unsigned long long app; } v; } ident;
+    const wchar_t *path;
+    const void *info;
+} NgxDiscovery;
+typedef NgxResult (*PFN_FeatInstReq)(const NgxDiscovery *, uint32_t *, VkExtensionProperties **);
+static char fg_names[16][VK_MAX_EXTENSION_NAME_SIZE];   // kept: NGX's list may not outlive the call
+static int fg_nnames;
+
 void vk_tmp_instance_exts(const char **ext, uint32_t *n, uint32_t max) {
     unsigned ni = 0, nd = 0;
     const char **ie = NULL, **de = NULL;
     if (!core_load() || !NGX_OK(N.req_ext(&ni, &ie, &nd, &de))) return;
     for (unsigned i = 0; i < ni; i++)
         if (!listed(ext, *n, ie[i]) && *n < max) ext[(*n)++] = ie[i], rt_log("temporal: NGX instance extension %s", ie[i]);
+#ifdef _WIN32
+    PFN_FeatInstReq req = (PFN_FeatInstReq)(void *)GetProcAddress((HMODULE)N.core,
+                                                                  "NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements");
+    if (!req) return;
+    static const wchar_t here[] = L".";
+    NgxDiscovery d;
+    memset(&d, 0, sizeof d);
+    d.sdk = NGX_VERSION_API, d.feature = 11 /* frame generation */, d.ident.type = 0, d.ident.v.app = NGX_APP_ID, d.path = here;
+    uint32_t k = 0;
+    VkExtensionProperties *pr = NULL;
+    if (NGX_OK(req(&d, &k, &pr)) && pr)
+        for (uint32_t i = 0; i < k && fg_nnames < 16; i++) {
+            snprintf(fg_names[fg_nnames], sizeof fg_names[0], "%s", pr[i].extensionName);
+            const char *nm = fg_names[fg_nnames++];
+            if (!listed(ext, *n, nm) && *n < max) ext[(*n)++] = nm, rt_log("temporal: DLSS-G instance extension %s", nm);
+        }
+#endif
 }
 
 void vk_tmp_device_exts(const VkExtensionProperties *have, uint32_t nhave, const char **ext, uint32_t *n, uint32_t max) {
@@ -542,8 +571,20 @@ static struct {
     VkPipeline mv;
     VkSampler samp;
     PFN_vkCmdPushDescriptorSetKHR push;
-    Own mvimg, outimg, zimg;
+    Own outimg;
+    Own mvs[3], zs[3];             // the motion vectors and depth of the last three evaluations (frame generation reads
+                                 // a frame's after the replay has gone on to the next ones)
 } R = {.ok = -1};
+
+#define FG_SLOTS 3
+static struct {                  // what each evaluation leaves for frame generation (vk_tmp_fg_inputs)
+    uint64_t frame;
+    uint32_t w, h;
+    float jx, jy, znear, zfar, fov, aspect, frame_ms;
+    int reset;
+    float cam[CAM_ROWS * 4];
+    double m[16];                // this frame's clip space to the last's
+} FS[FG_SLOTS];
 
 static int own_image(Own *o, uint32_t w, uint32_t h, VkFormat f) {
     if (o->img && o->w == w && o->h == h && o->fmt == f) return 1;
@@ -819,7 +860,9 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
     vk_exec_pass_end(ex);
     vk_exec_barrier(ex);
     rec_drain();   // from here the calls are made at once, after everything queued before
-    if (!own_image(&R.mvimg, w, h, VK_FORMAT_R16G16_SFLOAT) || !own_image(&R.zimg, w, h, VK_FORMAT_R32_SFLOAT)) return 0;
+    int slot = (int)(T.frame % FG_SLOTS);
+    Own *MV = &R.mvs[slot], *Z = &R.zs[slot];
+    if (!own_image(MV, w, h, VK_FORMAT_R16G16_SFLOAT) || !own_image(Z, w, h, VK_FORMAT_R32_SFLOAT)) return 0;
     VkImageView zview = game_view(&T.depth, VK_IMAGE_ASPECT_DEPTH_BIT), cview = game_view(color, VK_IMAGE_ASPECT_COLOR_BIT);
     // motion vectors
     {
@@ -836,8 +879,8 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
         }
         pc.kart[0] = T.kart ? 0.22f : 0.f, pc.kart[1] = 0.5f, pc.kart[2] = 0.78f, pc.kart[3] = kz;
         VkDescriptorImageInfo di0 = {R.samp, zview, VK_IMAGE_LAYOUT_GENERAL};
-        VkDescriptorImageInfo di1 = {VK_NULL_HANDLE, R.mvimg.view, VK_IMAGE_LAYOUT_GENERAL};
-        VkDescriptorImageInfo di2 = {VK_NULL_HANDLE, R.zimg.view, VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo di1 = {VK_NULL_HANDLE, MV->view, VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo di2 = {VK_NULL_HANDLE, Z->view, VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet wr[3] = {
             {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di0},
@@ -861,6 +904,7 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
     VkFormat of = VK_FORMAT_R16G16B16A16_SFLOAT;
     if (!own_image(&R.outimg, ow, oh, of)) return 0;
     float jx = T.debug == 3 ? 0.f : T.jx * T.jsign[0], jy = T.debug == 3 ? 0.f : T.jy * T.jsign[1];
+    int reset_was = T.reset;
     if (T.debug == 1 || T.debug == 2) {
         // the motion vectors (or the depth) scaled into the output, for a look: blit of the vector image
         VkImageBlit bl = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}},
@@ -870,7 +914,7 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
         vkCmdClearColorImage(cb, R.outimg.img, VK_IMAGE_LAYOUT_GENERAL, &cc, 1, &rr);
         barrier_all(cb);
         if (T.debug == 1)
-            vkCmdBlitImage(cb, R.mvimg.img, VK_IMAGE_LAYOUT_GENERAL, R.outimg.img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+            vkCmdBlitImage(cb, MV->img, VK_IMAGE_LAYOUT_GENERAL, R.outimg.img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
                            VK_FILTER_NEAREST);
         ok = 1;
     } else if (T.engine == VK_TMP_DLSS) {
@@ -880,7 +924,7 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
                 NgxResourceVK rc = res_image(cview, color->image, color->format, w, h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
                 NgxResourceVK ro = res_image(R.outimg.view, R.outimg.img, of, ow, oh, VK_IMAGE_ASPECT_COLOR_BIT, 1);
                 NgxResourceVK rz = res_image(zview, T.depth.image, T.depth.format, w, h, VK_IMAGE_ASPECT_DEPTH_BIT, 0);
-                NgxResourceVK rm = res_image(R.mvimg.view, R.mvimg.img, VK_FORMAT_R16G16_SFLOAT, w, h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
+                NgxResourceVK rm = res_image(MV->view, MV->img, VK_FORMAT_R16G16_SFLOAT, w, h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
                 p_setp(p, "Color", &rc);
                 p_setp(p, "Output", &ro);
                 p_setp(p, "Depth", &rz);
@@ -902,8 +946,8 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
             }
         }
     } else if (T.engine == VK_TMP_FSR3) {
-        VkTmpRes rc = {color->image, color->format, w, h}, rz = {R.zimg.img, VK_FORMAT_R32_SFLOAT, w, h},
-                 rm = {R.mvimg.img, VK_FORMAT_R16G16_SFLOAT, w, h}, ro = {R.outimg.img, of, ow, oh};
+        VkTmpRes rc = {color->image, color->format, w, h}, rz = {Z->img, VK_FORMAT_R32_SFLOAT, w, h},
+                 rm = {MV->img, VK_FORMAT_R16G16_SFLOAT, w, h}, ro = {R.outimg.img, of, ow, oh};
         ok = vk_tmp_ffx_upscale(cb, &rc, &rz, &rm, &ro, jx, jy, T.reset, frame_ms, znear, zfar, fov, hdr, T.sharp);
         if (!ok && T.fails++ < 4) rt_log("temporal: FSR 3.1 upscale failed");
     }
@@ -919,6 +963,12 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
         T.evals++;
         T.jw = w, T.jh = h, T.jdepth = T.depth.image;
         // the frame generation's inputs (vk_tmp_fg_inputs)
+        FS[slot].frame = T.frame, FS[slot].w = w, FS[slot].h = h, FS[slot].jx = jx, FS[slot].jy = jy;
+        FS[slot].znear = znear, FS[slot].zfar = zfar, FS[slot].fov = fov, FS[slot].frame_ms = frame_ms;
+        FS[slot].aspect = T.cam[7 * 4 + 0] != 0 ? fabsf(T.cam[8 * 4 + 1] / T.cam[7 * 4 + 0]) : 1.777f;
+        FS[slot].reset = reset_was;
+        memcpy(FS[slot].cam, T.cam, sizeof T.cam);
+        memcpy(FS[slot].m, m, sizeof m);
     }
     rec_drain();
     vk_exec_draw_forget();
@@ -928,9 +978,18 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
     return ok;
 }
 
-int vk_tmp_fg_inputs(VkTmpFgInputs *out) {
-    (void)out;
-    return 0;
+int vk_tmp_fg_inputs(uint64_t frame, VkTmpFgInputs *out) {
+    int s = (int)(frame % FG_SLOTS);
+    if (!frame || FS[s].frame != frame || !R.mvs[s].img) return 0;
+    out->mv = R.mvs[s].img, out->mv_view = R.mvs[s].view;
+    out->depth = R.zs[s].img, out->depth_view = R.zs[s].view, out->depth_fmt = VK_FORMAT_R32_SFLOAT;
+    out->w = FS[s].w, out->h = FS[s].h, out->jx = FS[s].jx, out->jy = FS[s].jy, out->reset = FS[s].reset;
+    memcpy(out->cam, FS[s].cam, sizeof out->cam);
+    memcpy(out->m, FS[s].m, sizeof out->m);
+    out->near_ = FS[s].znear, out->far_ = FS[s].zfar, out->fov_y = FS[s].fov, out->aspect = FS[s].aspect;
+    out->frame_ms = FS[s].frame_ms;
+    out->frame = frame;
+    return 1;
 }
 
 // ---------------------------------------------------------------- frame boundaries
@@ -965,14 +1024,167 @@ void vk_tmp_device_init(void) {
     read_cfg();
 }
 
+static void dlssg_release(void);
 void vk_tmp_shutdown(void) {
     const VkCtx *c = vk_ctx();
     if (!c) return;
     vkDeviceWaitIdle(c->device);
     if (F.feat && N.release) N.release(F.feat), F.feat = NULL;
+    dlssg_release();
     vk_tmp_ffx_shutdown();
-    Own *o[3] = {&R.mvimg, &R.outimg, &R.zimg};
-    for (int i = 0; i < 3; i++)
+    Own *o[7] = {&R.mvs[0], &R.mvs[1], &R.mvs[2], &R.outimg, &R.zs[0], &R.zs[1], &R.zs[2]};
+    for (int i = 0; i < 7; i++)
         if (o[i]->img) vkDestroyImageView(c->device, o[i]->view, NULL), vmaDestroyImage(c->vma, o[i]->img, o[i]->mem), *o[i] = (Own){0};
     if (N.up && N.shutdown1) N.shutdown1(c->device), N.up = 0;
+}
+
+// ---------------------------------------------------------------- DLSS Frame Generation through NGX (vk_framegen.c)
+// vk_framegen.c's present-thread command buffer, once the game's picture (HUD included) is copied into bb: count
+// frames between the last call's picture and this one into out[] (MultiFrameIndex 1..count, in display order), from
+// the depth, motion vectors, jitter and camera of the same game frame's upscale (vk_tmp_fg_inputs). The picture
+// without the HUD is not given: DLSS-G separates the HUD itself from the two pictures.
+#define NGX_FEATURE_FRAME_GENERATION 11
+static struct {
+    NgxHandle *feat;
+    NgxParam *p;
+    uint32_t w, h;
+    VkFormat fmt;
+    int failed, reset;
+    uint64_t last_frame, evals, misses;
+} G;
+
+static void fg_store(float out[16], const double m[16]) {   // handed out transposed, for row vectors
+    for (int r = 0; r < 4; r++)
+        for (int k = 0; k < 4; k++) out[r * 4 + k] = (float)m[k * 4 + r];
+}
+
+int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const VkTmpPic *out, int count) {
+    if (!N.up || !N.fg_max || G.failed || count < 1) return 0;
+    if (count > N.fg_max) count = N.fg_max;
+    VkTmpFgInputs in;
+    if (!vk_tmp_fg_inputs(frame, &in)) {
+        G.reset = 1;   // a frame without the inputs: the next generation has no valid previous frame
+        if (G.misses++ < 4)
+            rt_log("temporal: DLSS Frame Generation: no depth or motion vectors for frame %llu (is MKW_TEMPORAL on?)",
+                   (unsigned long long)frame);
+        return 0;
+    }
+    if (!G.p && !NGX_OK(N.alloc_params(&G.p))) {
+        G.failed = 1;
+        return 0;
+    }
+    NgxParam *p = G.p;
+    if (G.feat && (G.w != bb->w || G.h != bb->h || G.fmt != bb->fmt)) {
+        vkDeviceWaitIdle(vk_ctx()->device);
+        N.release(G.feat);
+        G.feat = NULL;
+    }
+    if (!G.feat) {
+        p_setu(p, "CreationNodeMask", 1);
+        p_setu(p, "VisibilityNodeMask", 1);
+        p_setu(p, "Width", bb->w);
+        p_setu(p, "Height", bb->h);
+        p_setu(p, "DLSSG.BackbufferFormat", (unsigned)bb->fmt);
+        NgxResult r = N.create(cb, NGX_FEATURE_FRAME_GENERATION, p, &G.feat);
+        if (!NGX_OK(r) || !G.feat) {
+            G.failed = 1, G.feat = NULL;
+            rt_log("temporal: DLSS Frame Generation could not be created (%08x): the port's own frame generation",
+                   (unsigned)r);
+            return 0;
+        }
+        G.w = bb->w, G.h = bb->h, G.fmt = bb->fmt, G.reset = 1;
+        rt_log("temporal: DLSS Frame Generation at %ux%u (format %d), depth and motion %ux%u, up to %d generated",
+               bb->w, bb->h, (int)bb->fmt, in.w, in.h, N.fg_max);
+    }
+    // the camera: projection rows 7-10, view rows 0-2 (right, up, back; it looks down -z)
+    double P[16], Pi[16], mi[16];
+    for (int i = 0; i < 16; i++) P[i] = in.cam[28 + i];
+    if (!inv4(P, Pi) || !inv4(in.m, mi)) return 0;
+    static float v2c[16], c2v[16], c2p[16], p2c[16];
+    fg_store(v2c, P), fg_store(c2v, Pi), fg_store(c2p, in.m), fg_store(p2c, mi);
+    float pos[3], up[3], right[3], fwd[3];
+    const float *v = in.cam;
+    for (int i = 0; i < 3; i++) {
+        right[i] = v[i], up[i] = v[4 + i], fwd[i] = -v[8 + i];
+        pos[i] = -(v[i] * v[3] + v[4 + i] * v[7] + v[8 + i] * v[11]);
+    }
+    NgxResourceVK rb = res_image(bb->view, bb->img, bb->fmt, bb->w, bb->h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
+    NgxResourceVK rz = res_image(in.depth_view, in.depth, VK_FORMAT_R32_SFLOAT, in.w, in.h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
+    NgxResourceVK rm = res_image(in.mv_view, in.mv, VK_FORMAT_R16G16_SFLOAT, in.w, in.h, VK_IMAGE_ASPECT_COLOR_BIT, 0);
+    p_setp(p, "DLSSG.Backbuffer", &rb);
+    p_setp(p, "DLSSG.Depth", &rz);
+    p_setp(p, "DLSSG.MVecs", &rm);
+    p_setp(p, "DLSSG.HUDLess", NULL);
+    p_setp(p, "DLSSG.UI", NULL);
+    p_setp(p, "DLSSG.UIAlpha", NULL);
+    p_setp(p, "DLSSG.BidirectionalDistortionField", NULL);
+    p_setp(p, "DLSSG.OutputReal", NULL);
+    p_setp(p, "DLSSG.OutputDisableInterpolation", NULL);
+    p_setp(p, "DLSSG.CameraViewToClip", v2c);
+    p_setp(p, "DLSSG.ClipToCameraView", c2v);
+    p_setp(p, "DLSSG.ClipToLensClip", NULL);
+    p_setp(p, "DLSSG.ClipToPrevClip", c2p);
+    p_setp(p, "DLSSG.PrevClipToClip", p2c);
+    p_setf(p, "DLSSG.JitterOffsetX", in.jx);
+    p_setf(p, "DLSSG.JitterOffsetY", in.jy);
+    p_setf(p, "DLSSG.MvecScaleX", 1.0f / (float)in.w);   // the vectors are in render pixels
+    p_setf(p, "DLSSG.MvecScaleY", 1.0f / (float)in.h);
+    p_setf(p, "DLSSG.CameraPinholeOffsetX", 0.0f);
+    p_setf(p, "DLSSG.CameraPinholeOffsetY", 0.0f);
+    static const char *const kp[] = {"DLSSG.CameraPosX", "DLSSG.CameraPosY", "DLSSG.CameraPosZ"};
+    static const char *const ku[] = {"DLSSG.CameraUpX", "DLSSG.CameraUpY", "DLSSG.CameraUpZ"};
+    static const char *const kr[] = {"DLSSG.CameraRightX", "DLSSG.CameraRightY", "DLSSG.CameraRightZ"};
+    static const char *const kf[] = {"DLSSG.CameraFwdX", "DLSSG.CameraFwdY", "DLSSG.CameraFwdZ"};
+    for (int i = 0; i < 3; i++)
+        p_setf(p, kp[i], pos[i]), p_setf(p, ku[i], up[i]), p_setf(p, kr[i], right[i]), p_setf(p, kf[i], fwd[i]);
+    p_setf(p, "DLSSG.CameraNear", in.near_);
+    p_setf(p, "DLSSG.CameraFar", in.far_);
+    p_setf(p, "DLSSG.CameraFOV", in.fov_y);
+    p_setf(p, "DLSSG.CameraAspectRatio", in.aspect);
+    p_setu(p, "DLSSG.ColorBuffersHDR", 0);
+    p_setu(p, "DLSSG.DepthInverted", 0);
+    p_setu(p, "DLSSG.CameraMotionIncluded", 1);
+    int reset = G.reset || in.reset || (G.last_frame && frame != G.last_frame + 1);
+    p_setu(p, "DLSSG.Reset", (unsigned)reset);
+    p_setu(p, "DLSSG.AutomodeOverrideReset", 0);
+    p_setu(p, "DLSSG.NotRenderingGameFrames", 0);
+    p_setu(p, "DLSSG.OrthoProjection", 0);
+    p_setu(p, "DLSSG.MvecDilated", 0);
+    p_setu(p, "DLSSG.MenuDetectionEnabled", 0);
+    struct { const char *base; uint32_t w, h; } rects[] = {
+        {"DLSSG.MVecsSubrect", in.w, in.h}, {"DLSSG.DepthSubrect", in.w, in.h},
+        {"DLSSG.HUDLessSubrect", bb->w, bb->h}, {"DLSSG.InputBackbufferSubrect", bb->w, bb->h},
+        {"DLSSG.OutputInterpolatedSubrect", bb->w, bb->h}, {"DLSSG.OutputRealSubrect", bb->w, bb->h}};
+    for (size_t i = 0; i < sizeof rects / sizeof *rects; i++) {
+        char k[64];
+        snprintf(k, sizeof k, "%sBaseX", rects[i].base), p_setu(p, k, 0);
+        snprintf(k, sizeof k, "%sBaseY", rects[i].base), p_setu(p, k, 0);
+        snprintf(k, sizeof k, "%sWidth", rects[i].base), p_setu(p, k, rects[i].w);
+        snprintf(k, sizeof k, "%sHeight", rects[i].base), p_setu(p, k, rects[i].h);
+    }
+    p_setu(p, "DLSSG.MultiFrameCount", (unsigned)count);
+    int made = 0;
+    for (int i = 0; i < count; i++) {
+        NgxResourceVK ro = res_image(out[i].view, out[i].img, out[i].fmt, out[i].w, out[i].h, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+        p_setp(p, "DLSSG.OutputInterpolated", &ro);
+        p_setu(p, "DLSSG.MultiFrameIndex", (unsigned)(i + 1));
+        NgxResult r = N.evaluate(cb, G.feat, p, NULL);
+        if (!NGX_OK(r)) {
+            static int told;
+            if (told++ < 5) rt_log("temporal: DLSS Frame Generation evaluation %d of %d failed (%08x)", i + 1, count, (unsigned)r);
+            break;
+        }
+        made++;
+    }
+    barrier_all(cb);
+    G.reset = 0;
+    G.last_frame = frame;
+    if (made && (++G.evals == 1 || G.evals % 3600 == 0))
+        rt_log("temporal: DLSS Frame Generation: %llu game frames, %d generated per game frame",
+               (unsigned long long)G.evals, made);
+    return made;
+}
+
+static void dlssg_release(void) {
+    if (G.feat && N.release) N.release(G.feat), G.feat = NULL;
 }

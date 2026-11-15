@@ -116,6 +116,7 @@ int vk_present_ahead_max(void);       // presents that may wait at once (the swa
 double vk_present_refresh_hz(void);   // the window's monitor, 0 unknown
 // ---- frame generation (vk_framegen.c), the present thread
 #define VK_FG_MAX 4   // frames shown per game frame at most
+extern uint64_t vk_fg_game_frame;   // the game frame the present thread makes frames for (vk_framegen.c)
 int vk_fg_wanted(void);   // MKW_FRAMEGEN is not off: the swapchain keeps spare images for it
 // One game frame: copies the crop rectangle {x, y, w, h} of src (GENERAL, all its writes submitted) into a picture of
 // its own and submits the frames made between the last game frame and it. out: what to show, in order (the made

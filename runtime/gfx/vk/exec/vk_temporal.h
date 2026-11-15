@@ -38,11 +38,19 @@ typedef struct {
     uint32_t w, h;          // render size
     float jx, jy;           // jitter in render pixels
     int reset;
-    float cam[16 * 4];      // the camera block rows 0-15 (view, view-projection, projection, inverse view)
-    float near_, far_, fov_y, aspect;
+    float cam[32 * 4];      // the camera block rows 0-31 (view, view-projection, projection, inverse view; 21-31 last frame's)
+    double m[16];           // this frame's clip space to the last frame's (row-major, column vectors)
+    float near_, far_, fov_y, aspect, frame_ms;
     uint64_t frame;         // the game frame these belong to
 } VkTmpFgInputs;
-int vk_tmp_fg_inputs(VkTmpFgInputs *out);
+int vk_tmp_fg_inputs(uint64_t frame, VkTmpFgInputs *out);
+// DLSS Frame Generation (NGX) for vk_framegen.c: count frames between the last call's picture and bb into out[]; returns
+// how many it made, 0 when it cannot (the caller falls back to its own). vk_tmp_ngx_fg_max: the most this GPU makes.
+typedef struct { VkImage img; VkImageView view; VkFormat fmt; uint32_t w, h; } VkTmpPic;
+int vk_tmp_dlssg(VkCommandBuffer cb, uint64_t frame, const VkTmpPic *bb, const VkTmpPic *out, int count);
+int vk_tmp_ngx_fg_max(void);
+// FSR 3.1 frame generation (vk_tmp_ffx.cpp): one frame between the last call's picture and bb into out
+int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const VkTmpPic *bb, const VkTmpPic *out);
 
 // FFX (vk_tmp_ffx.cpp)
 int vk_tmp_ffx_load(void);

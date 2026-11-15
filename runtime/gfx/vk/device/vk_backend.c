@@ -66,6 +66,7 @@ static void present_main(void *arg) {
         VkImage fo[VK_FG_MAX];
         int fw = 0, fh = 0;
         uint64_t step = 0;
+        vk_fg_game_frame = j.frame;   // DLSS-G and FSR 3.1 take that frame's depth and motion (vk_temporal.c)
         int nf = vk_fg_frame(j.image, j.w, j.h, j.has_crop ? j.crop : NULL, j.at, fo, &fw, &fh, &step);
         for (int k = 0; k < nf; k++) vk_present_blit_ahead(fo[k], VK_IMAGE_LAYOUT_GENERAL, VK_FORMAT_R8G8B8A8_UNORM, fw, fh, NULL);
         if (!nf) vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);

@@ -32,6 +32,7 @@
 #include "fg_median_spv.h"
 #include "fg_synth_spv.h"
 #include "hacks.h"
+#include "vk_temporal.h"
 #include "host.h"
 
 #define SLOTS 4
@@ -305,6 +306,34 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     pass(cb, F.luma, &F.pic[cur], NULL, NULL, &F.lf[cur], colour, (uint32_t)cw, (uint32_t)ch);
     pass(cb, F.luma, &F.lf[cur], NULL, NULL, &F.lq[cur], level, qw, qh);
     pass(cb, F.luma, &F.lq[cur], NULL, NULL, &F.le[cur], level, gw, gh);
+    // DLSS Frame Generation or FSR 3.1 frame generation (MKW_FG_ENGINE, vk_temporal.c) in the place of the optical flow,
+    // from the same game frame's depth, motion vectors and camera; the flow below when they cannot
+    int eng = !strcmp(cfg_value("MKW_FG_ENGINE"), "dlss") ? 1 : !strcmp(cfg_value("MKW_FG_ENGINE"), "fsr3") ? 2 : 0;
+    if (made && eng) {
+        VkTmpPic bb = {F.pic[cur].img, F.pic[cur].view, VK_FORMAT_R8G8B8A8_UNORM, (uint32_t)cw, (uint32_t)ch};
+        VkTmpPic outs[VK_FG_MAX - 1];
+        for (int k = 0; k < VK_FG_MAX - 1; k++)
+            outs[k] = (VkTmpPic){F.made[k].img, F.made[k].view, VK_FORMAT_R8G8B8A8_UNORM, (uint32_t)cw, (uint32_t)ch};
+        int got = 0;
+        if (eng == 1) {
+            got = vk_tmp_dlssg(cb, vk_fg_game_frame, &bb, outs, made);
+        } else {
+            VkTmpFgInputs in;
+            if (vk_tmp_fg_inputs(vk_fg_game_frame, &in)) got = vk_tmp_ffx_fg(cb, &in, &bb, &outs[0]);
+        }
+        if (got) {
+            static int last_eng = -1;
+            if (last_eng != eng) last_eng = eng, rt_log("vk: frame generation by %s", eng == 1 ? "DLSS Frame Generation" : "FSR 3.1");
+            made = got;
+            mem_barrier(cb);
+            for (int k = 0; k < made; k++) out[k] = F.made[k].img;
+            out[made] = F.pic[cur].img;
+            *ow = cw, *oh = ch;
+            F.have_prev = 1;
+            F.cur = prev;
+            return made + 1;
+        }
+    }
     if (made) {
         const float pc16[4] = {16, F.lambda, F.bias, 0}, pc4[4] = {4, F.lambda, F.bias, 0}, pc1[4] = {1, F.lambda, F.bias, 0};
         pass(cb, F.coarse, &F.le[prev], &F.le[cur], NULL, &F.fl[0], pc16, (gw + 1) / 2, (gh + 1) / 2);
@@ -357,6 +386,8 @@ int vk_fg_wanted(void) { return strcmp(cfg_value("MKW_FRAMEGEN"), "off") != 0; }
 // four in a row as g<n>.png and the first frame made before each as m<n>.png, read back on the present thread (it
 // waits for the GPU then): tools/imagen/fg_check.py takes three g in a row (the made frame between the first and the
 // third against the second). MKW_SHOTS reads the game's pictures, black on some machines; these are what is shown.
+uint64_t vk_fg_game_frame;   // the game frame vk_fg_frame is called for (vk_backend.c present_main)
+
 static struct { uint64_t at; VkBuffer buf; VmaAllocation alloc; void *map; VkDeviceSize size; } D;
 
 static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int h) {

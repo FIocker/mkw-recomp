@@ -15,6 +15,7 @@
 
 #include "ffx_api.h"
 #include "ffx_upscale.h"
+#include "ffx_framegeneration.h"
 #include "vk/ffx_api_vk.h"
 
 extern "C" {
@@ -183,6 +184,128 @@ extern "C" int vk_tmp_ffx_upscale(VkCommandBuffer cb, const VkTmpRes *color, con
     return 1;
 }
 
+// ---- frame generation: FSR 3.1's interpolation without its swapchain (FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY):
+// vk_framegen.c's present thread presents the frame like its own made ones. Each game frame: the prepare pass (depth,
+// motion vectors, camera) and the generation, both into the present thread's command buffer.
+namespace {
+struct {
+    ffxContext ctx = nullptr;
+    uint32_t w = 0, h = 0, rw = 0, rh = 0;
+    VkFormat fmt = VK_FORMAT_UNDEFINED;
+    uint64_t id = 0, last_frame = 0, evals = 0;
+    int failed = 0;
+} FG;
+
+void fg_destroy() {
+    if (!FG.ctx) return;
+    vkDeviceWaitIdle(vk_ctx()->device);
+    A.destroy(&FG.ctx, nullptr);
+    FG.ctx = nullptr;
+}
+
+FfxApiResource pic(const VkTmpPic *p, int write) {
+    VkTmpRes r = {p->img, p->fmt, p->w, p->h};
+    return res(&r, write);
+}
+}  // namespace
+
+extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const VkTmpPic *bb, const VkTmpPic *out) {
+    if (!vk_tmp_ffx_load() || FG.failed) return 0;
+    const VkCtx *c = vk_ctx();
+    if (FG.ctx && (FG.w != bb->w || FG.h != bb->h || FG.fmt != bb->fmt || in->w > FG.rw || in->h > FG.rh)) fg_destroy();
+    if (!FG.ctx) {
+        ffxCreateContextDescFrameGeneration d = {};
+        d.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
+        d.flags = 0;
+        d.displaySize = {bb->w, bb->h};
+        d.maxRenderSize = {bb->w, bb->h};
+        d.backBufferFormat = surface(bb->fmt);
+        ffxCreateBackendVKDesc be = {};
+        ffxCreateBackendVKDesc_DEPRECATED old = {};
+        if (A.legacy) {
+            old.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_DEPRECATED;
+            old.vkDevice = c->device, old.vkPhysicalDevice = c->phys, old.vkDeviceProcAddr = vkGetDeviceProcAddr;
+            d.header.pNext = &old.header;
+        } else {
+            be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
+            be.deviceContext.vkDevice = c->device, be.deviceContext.vkPhysicalDevice = c->phys;
+            be.deviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
+            d.header.pNext = &be.header;
+        }
+        ffxReturnCode_t r = A.create(&FG.ctx, &d.header, nullptr);
+        if (r != FFX_API_RETURN_OK) {
+            FG.ctx = nullptr, FG.failed = 1;
+            rt_log("ffx: frame generation context %ux%u could not be created (%u): the port's own frame generation",
+                   bb->w, bb->h, r);
+            return 0;
+        }
+        FG.w = bb->w, FG.h = bb->h, FG.rw = bb->w, FG.rh = bb->h, FG.fmt = bb->fmt, FG.id = 0;
+        rt_log("ffx: FSR 3.1 frame generation context %ux%u", bb->w, bb->h);
+    }
+    int reset = in->reset || (FG.last_frame && in->frame != FG.last_frame + 1);
+    FG.id++;
+    ffxConfigureDescFrameGeneration cf = {};
+    cf.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+    cf.swapChain = nullptr;
+    cf.frameGenerationEnabled = true;
+    cf.allowAsyncWorkloads = false;
+    cf.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
+    cf.generationRect = {0, 0, (int32_t)bb->w, (int32_t)bb->h};
+    cf.frameID = FG.id;
+    ffxReturnCode_t r = A.configure(&FG.ctx, &cf.header);
+    if (r != FFX_API_RETURN_OK) {
+        FG.failed = 1;
+        rt_log("ffx: frame generation configure failed (%u): the port's own frame generation", r);
+        return 0;
+    }
+    ffxDispatchDescFrameGenerationPrepareV2 pr = {};
+    pr.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
+    pr.frameID = FG.id;
+    pr.commandList = (void *)cb;
+    pr.renderSize = {in->w, in->h};
+    pr.jitterOffset = {in->jx, in->jy};
+    pr.motionVectorScale = {1.0f, 1.0f};
+    pr.frameTimeDelta = in->frame_ms;
+    pr.reset = reset != 0;
+    pr.cameraNear = in->near_;
+    pr.cameraFar = in->far_;
+    pr.cameraFovAngleVertical = in->fov_y;
+    pr.viewSpaceToMetersFactor = 0.01f;
+    VkTmpRes rz = {in->depth, VK_FORMAT_R32_SFLOAT, in->w, in->h}, rm = {in->mv, VK_FORMAT_R16G16_SFLOAT, in->w, in->h};
+    pr.depth = res(&rz, 0);
+    pr.motionVectors = res(&rm, 0);
+    const float *v = in->cam;
+    for (int i = 0; i < 3; i++) {
+        pr.cameraRight[i] = v[i], pr.cameraUp[i] = v[4 + i], pr.cameraForward[i] = -v[8 + i];
+        pr.cameraPosition[i] = -(v[i] * v[3] + v[4 + i] * v[7] + v[8 + i] * v[11]);
+    }
+    r = A.dispatch(&FG.ctx, &pr.header);
+    if (r != FFX_API_RETURN_OK) {
+        if (FG.evals < 4) rt_log("ffx: frame generation prepare failed (%u)", r);
+        return 0;
+    }
+    ffxDispatchDescFrameGeneration g = {};
+    g.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION;
+    g.commandList = (void *)cb;
+    g.presentColor = pic(bb, 0);
+    g.outputs[0] = pic(out, 1);
+    g.numGeneratedFrames = 1;
+    g.reset = reset != 0;
+    g.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+    g.minMaxLuminance[0] = 0.f, g.minMaxLuminance[1] = 1.f;
+    g.generationRect = {0, 0, (int32_t)bb->w, (int32_t)bb->h};
+    g.frameID = FG.id;
+    r = A.dispatch(&FG.ctx, &g.header);
+    if (r != FFX_API_RETURN_OK) {
+        if (FG.evals < 4) rt_log("ffx: frame generation dispatch failed (%u)", r);
+        return 0;
+    }
+    FG.last_frame = in->frame;
+    if (++FG.evals == 1 || FG.evals % 3600 == 0)
+        rt_log("ffx: FSR 3.1 frame generation: %llu game frames", (unsigned long long)FG.evals);
+    return 1;
+}
+
 extern "C" void vk_tmp_ffx_shutdown(void) {
-    if (A.ok) destroy_ctx();
+    if (A.ok) destroy_ctx(), fg_destroy();
 }
