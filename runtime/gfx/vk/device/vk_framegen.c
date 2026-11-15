@@ -60,6 +60,8 @@ static struct {
     VkOfResult of_result;
     uint64_t of_last_frame;
     int of_active, of_hudless;
+    VkTmpFgInputs of_prev;                // the previous present-thread inputs, when replay metadata has moved on
+    int of_prev_ok;
     VkSampler sampler;
     VkCommandPool pool;
     VkCommandBuffer cb[SLOTS];
@@ -400,16 +402,59 @@ static void fsr_motion_pass(VkCommandBuffer cb, const VkTmpFgInputs *in, const I
     mem_barrier(cb);
 }
 
-static int of_motion_pass(VkCommandBuffer cb, VkBuffer vectors, uint32_t gw, uint32_t gh, uint32_t grid,
-                          const Img *out, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, float jx, float jy) {
+static int of_motion_pass(VkCommandBuffer cb, const VkTmpFgInputs *in, const VkTmpFgInputs *cached_prev,
+                          VkImageView current_color, VkImageView previous_color,
+                          VkBuffer vectors, uint32_t gw, uint32_t gh, uint32_t grid, const Img *out, uint32_t rw,
+                          uint32_t rh, uint32_t ow, uint32_t oh, float jx, float jy) {
     VkCtx *c = vk_ctx();
+    VkTmpFgInputs prev = {0};
+    static int geometry_mode = -1;
+    if (geometry_mode < 0) geometry_mode = rt_knob("FG_NVOF_GEOMETRY", "0");
+    static int refine_mode = -1;
+    if (refine_mode < 0) refine_mode = rt_knob("FG_NVOF_REFINE", "0");
+    static int camera_mode = -1;
+    if (camera_mode < 0) camera_mode = rt_knob("FG_NVOF_CAMERA", "0");
+    int camera_agreement = RT_KNOB_ON(camera_mode);
+    static int last_camera = -1;
+    if (last_camera != camera_agreement) last_camera = camera_agreement,
+        rt_log("vk: FSR hardware motion camera agreement %s (2 output-pixel tolerance)", camera_agreement ? "on" : "off");
+    int refine = RT_KNOB_ON(refine_mode);
+    static int last_refine = -1;
+    if (last_refine != refine) last_refine = refine,
+        rt_log("vk: FSR hardware motion endpoint refinement %s", refine ? "on" : "off");
+    int knob_on = RT_KNOB_ON(geometry_mode), prev_ok = 0, prev_source = 0;
+    if (knob_on && !in->reset) {
+        if (in->frame > 1 && vk_tmp_fg_inputs(in->frame - 1, &prev))
+            prev_ok = prev.depth_view && prev.w == in->w && prev.h == in->h && !prev.reset, prev_source = 1;
+        if (!prev_ok && cached_prev && cached_prev->frame + 1 == in->frame) {
+            prev = *cached_prev, prev_source = 2;
+            prev_ok = prev.depth_view && prev.w == in->w && prev.h == in->h && !prev.reset;
+        }
+        if (!prev_ok) prev_source = 0;
+    }
+    static int logged_geometry = -1;
+    int geometry_state = prev_ok ? prev_source : 0;
+    if (logged_geometry != geometry_state) {
+        logged_geometry = geometry_state;
+        if (prev_ok)
+            rt_log("vk: FSR motion depth geometry active: frame %llu/%llu, %ux%u previous depth from %s; 2%% gate",
+                   (unsigned long long)in->frame, (unsigned long long)prev.frame, in->w, in->h,
+                   prev_source == 1 ? "replay metadata" : "present cache");
+        else
+            rt_log("vk: FSR motion depth geometry off at frame %llu: knob %s, previous depth %s",
+                   (unsigned long long)in->frame, knob_on ? "on" : "off", knob_on ? "unavailable or reset" : "not queried");
+    }
     if (!F.of_mvp) {
-        VkDescriptorSetLayoutBinding b[2] = {
+        VkDescriptorSetLayoutBinding b[6] = {
             {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
-            {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+            {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+            {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+            {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+            {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+            {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
         VkDescriptorSetLayoutCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 2, .pBindings = b};
-        VkPushConstantRange pc = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 48};
+            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 6, .pBindings = b};
+        VkPushConstantRange pc = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 128};
         if (vkCreateDescriptorSetLayout(c->device, &di, NULL, &F.of_dsl) != VK_SUCCESS) return 0;
         VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1, .pSetLayouts = &F.of_dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pc};
@@ -418,16 +463,32 @@ static int of_motion_pass(VkCommandBuffer cb, VkBuffer vectors, uint32_t gw, uin
         if (!F.of_mvp) return 0;
     }
     VkDescriptorBufferInfo bi = {vectors, 0, (VkDeviceSize)gw * gh * 4};
-    VkDescriptorImageInfo ii = {VK_NULL_HANDLE, out->view, VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet wr[2] = {
+    VkDescriptorImageInfo ii[5] = {
+        {VK_NULL_HANDLE, out->view, VK_IMAGE_LAYOUT_GENERAL},
+        {F.sampler, in->depth_view, VK_IMAGE_LAYOUT_GENERAL},
+        {F.sampler, prev_ok ? prev.depth_view : in->depth_view, VK_IMAGE_LAYOUT_GENERAL},
+        {F.sampler, current_color, VK_IMAGE_LAYOUT_GENERAL},
+        {F.sampler, previous_color, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[6] = {
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi},
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1,
-         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii}};
-    struct { float size[4]; int grid[4]; float jitter[4]; } pc = {
-        {(float)rw,(float)rh,(float)ow,(float)oh},{(int)gw,(int)gh,(int)grid,0},{jx,jy,0.f,0.f}};
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii[0]},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 2, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[1]},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 3, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[2]},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 4, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[3]},
+        {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 5, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[4]}};
+    struct { float size[4]; int grid[4]; float jitter[4]; float reproj[16]; float geometry[4]; } pc = {
+        {(float)rw,(float)rh,(float)ow,(float)oh},{(int)gw,(int)gh,(int)grid,refine},{jx,jy,0.f,0.f},{0},
+        {camera_agreement ? 2.f : prev_ok ? 1.f : 0.f,in->near_,in->far_,0.02f}};
+    for (int r = 0; r < 4; r++)
+        for (int col = 0; col < 4; col++) pc.reproj[col * 4 + r] = (float)in->m[r * 4 + col];
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.of_mvp);
-    rec_push(F.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.of_layout, 0, 2, wr);
+    rec_push(F.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, F.of_layout, 0, 6, wr);
     vkCmdPushConstants(cb, F.of_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
     vkCmdDispatch(cb, (rw + 7) / 8, (rh + 7) / 8, 1);
     mem_barrier(cb);
@@ -692,11 +753,17 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             VkTmpFgInputs in;
             if (have_fgin || vk_tmp_fg_inputs(vk_fg_game_frame, &in)) {
                 if (have_fgin) in = fgin;
+                VkTmpFgInputs current_in = in;
+                const VkTmpFgInputs *cached_prev =
+                    F.of_prev_ok && F.of_prev.frame + 1 == in.frame ? &F.of_prev : NULL;
                 int full_mv_ready = 0;
                 static int of_jitter = -1;
                 if (of_jitter < 0) of_jitter = rt_knob("FG_NVOF_JITTER", "1");
-                if (F.of_active && of_motion_pass(cb, F.of_result.vectors, F.of_result.wblocks, F.of_result.hblocks,
-                                                  F.of_result.grid, &F.fsr_mv,
+                if (F.of_active && of_motion_pass(cb, &in, cached_prev,
+                                                  F.of_hudless ? H->view : F.pic[cur].view,
+                                                  F.of_hudless ? (use_h ? F.hhlp.view : F.hlp.view) : F.pic[prev].view,
+                                                  F.of_result.vectors, F.of_result.wblocks,
+                                                  F.of_result.hblocks, F.of_result.grid, &F.fsr_mv,
                                                   display_mv ? (uint32_t)cw : in.w, display_mv ? (uint32_t)ch : in.h,
                                                   (uint32_t)cw, (uint32_t)ch,
                                                   !display_mv && RT_KNOB_ON(of_jitter) ? in.jx : 0.f,
@@ -729,6 +796,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                     pass(cb, F.synth, &F.pic[prev], &F.pic[cur], &F.fl[5], &F.made[1], pc, (uint32_t)cw, (uint32_t)ch);
                     F.compare_native = F.made[1].img;
                 }
+                F.of_prev = current_in, F.of_prev_ok = 1;
             }
         }
         if (got) {
@@ -849,6 +917,7 @@ static struct {
     VkDeviceSize size, stride;
     int n[DUMP_N], hl[DUMP_N], ref[DUMP_N], depth[DUMP_N], w, h;
     float near_[DUMP_N], far_[DUMP_N];
+    VkTmpFgInputs inputs[DUMP_N];
     int nv[DUMP_N];
     uint32_t grid[DUMP_N][3];
     VkFormat fmt;   // exact presented encoding, including packed HDR10 readback
@@ -891,6 +960,7 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
     VkTmpFgInputs in;
     D.depth[k] = vk_tmp_fg_inputs(vk_fg_game_frame, &in);
     if (D.depth[k]) {
+        D.inputs[k] = in;
         D.near_[k] = in.near_, D.far_[k] = in.far_;
         // Sparse raw depth samples distinguish an incorrect foreground depth from a bad motion vector. No image
         // conversion: the SDK's actual R32 values, in a fifth readback plane used only by this diagnostic.
@@ -942,6 +1012,26 @@ static void dump_write(VkFence fence) {
         const float *z = (const float *)((const uint8_t *)D.map + (size_t)D.stride * f + px * 4);
         rt_log("fg depth: frame %llu near %.8g far %.8g, samples %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g",
                (unsigned long long)(D.at + f), D.near_[f], D.far_[f], z[0],z[1],z[2],z[3],z[4],z[5],z[6],z[7],z[8]);
+        if (D.nv[f]) {
+            const VkTmpFgInputs *in = &D.inputs[f];
+            const float xy[9][2] = {{.5f,.3f},{.5f,.55f},{.5f,.7f},{.4f,.8f},{.6f,.8f},{.5f,.9f},{.25f,.8f},{.75f,.8f},{.5f,.98f}};
+            const int16_t *nv = (const int16_t *)((const uint8_t *)D.map + (size_t)D.stride * f + px * 4 + 64);
+            for (int i = 0; i < 9; i++) {
+                int rx = (int)(xy[i][0] * in->w), ry = (int)(xy[i][1] * in->h);
+                double ux = (rx + .5) / in->w, uy = (ry + .5) / in->h;
+                double clip[4] = {ux*2-1,1-uy*2,z[i]*2-1,1}, previous[4] = {0};
+                for (int r = 0; r < 4; r++) for (int col = 0; col < 4; col++) previous[r] += in->m[r*4+col] * clip[col];
+                if (previous[3] < 1e-7) continue;
+                double cx = ((previous[0]/previous[3]*.5+.5)-ux)*D.w;
+                double cy = ((.5-previous[1]/previous[3]*.5)-uy)*D.h;
+                int gx = (int)((rx+.5-in->jx)*D.w/in->w) / (int)D.grid[f][2];
+                int gy = (int)((ry+.5-in->jy)*D.h/in->h) / (int)D.grid[f][2];
+                if (gx < 0 || gy < 0 || gx >= (int)D.grid[f][0] || gy >= (int)D.grid[f][1]) continue;
+                size_t p = ((size_t)gy*D.grid[f][0]+gx)*2;
+                rt_log("fg motion: frame %llu sample %d uv %.3f %.3f camera %.3f %.3f hardware %.3f %.3f (output pixels)",
+                    (unsigned long long)(D.at+f),i,ux,uy,cx,cy,nv[p]/32.f,nv[p+1]/32.f);
+            }
+        }
     }
     for (int f = 0; f < DUMP_N; f++) if (D.nv[f]) {
         snprintf(path, sizeof path, "%s/o%llu.bin", dir, (unsigned long long)(D.at + f));

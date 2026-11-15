@@ -44,3 +44,20 @@ the `nvngx_dlssg.dll` next to `mkw.exe` interpolates properly. `MKW_NGX_LOG=1` l
 
 Diagnostics: `MKW_TEMPORAL_DEBUG=mv|nojitter`, `MKW_TEMPORAL_JSIGN`, `MKW_TEMPORAL_TRACE=<frame>`, `MKW_TEMPORAL_KART=0`,
 `MKW_NGX_LOG=1|2` (NGX's own log lines in ours), `MKW_DLSSG_EXP=<mask>` (vk_temporal.c vk_tmp_dlssg), `MKW_FG_DUMP`.
+
+## Frame-generation diagnostics under development
+
+`--probe-fsr-fg` runs the real FSR provider without game assets or a window, using an analytical moving plane and a
+fixed foreground object and shadow. `MKW_FSR_PROBE_MV=geometry|image|zero` selects the known motion input;
+`MKW_FSR_PROBE_SHIFT=0,-64` sets integer pixel displacement, and `MKW_FSR_PROBE_OPAQUE=1` makes the shadow a constant
+opaque patch with unambiguous zero image motion. `MKW_FSR_PROBE_OUT=<file.ppm>` writes the generated midpoint.
+`MKW_FSR_PROBE_SHADOW_LIMIT=2` enables a quality gate against the analytical midpoint, in addition to the integration
+check. On provider 3.1.6, the opaque image-motion case passes at `(0,-8)` but fails at `(0,-64)`: the body remains exact,
+while shadow mean error rises from 0.225 to 41.429 levels of 255. A successful SDK dispatch alone is not quality acceptance.
+
+Experimental motion controls default off: `MKW_FG_NVOF` uses the Vulkan hardware optical-flow queue on supported NVIDIA
+devices; `MKW_FG_NVOF_GRID=1|2|4` changes its vector grid (default 4). `MKW_FG_NVOF_GEOMETRY`, `MKW_FG_NVOF_REFINE`, and
+`MKW_FG_NVOF_CAMERA` test depth classification, endpoint correspondence, and camera agreement respectively. Race captures
+still show artifacts with each of these controls; none is an accepted quality fix. `MKW_FSR_FG_FLAT_DEPTH=1` supplies a
+separate constant depth image to isolate SDK reconstruction; it never changes the game's depth and also does not fix the
+shadow defect. These controls are diagnostic experiments, not recommended player settings.

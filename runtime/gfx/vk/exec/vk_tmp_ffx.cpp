@@ -231,17 +231,63 @@ struct {
     ffxContext ctx = nullptr;
     uint32_t w = 0, h = 0, rw = 0, rh = 0;
     VkFormat fmt = VK_FORMAT_UNDEFINED;
+    VkImage flat_depth = VK_NULL_HANDLE;
+    VmaAllocation flat_alloc = VK_NULL_HANDLE;
+    uint32_t flat_log_w = 0, flat_log_h = 0;
+    int flat_layout = 0;
     uint64_t id = 0, last_frame = 0, evals = 0;
     int failed = 0;
 } FG;
 
 void fg_destroy() {
-    if (!FG.ctx) return;
+    if (!FG.ctx && !FG.flat_depth) return;
     vk_queue_lock();   // the present thread, as vk_framegen.c ensure_images
     vkDeviceWaitIdle(vk_ctx()->device);
+    if (FG.flat_depth) vmaDestroyImage(vk_ctx()->vma, FG.flat_depth, FG.flat_alloc);
     vk_queue_unlock();
-    A.destroy(&FG.ctx, nullptr);
-    FG.ctx = nullptr;
+    if (FG.ctx) A.destroy(&FG.ctx, nullptr);
+    FG.ctx = nullptr, FG.flat_depth = VK_NULL_HANDLE, FG.flat_alloc = VK_NULL_HANDLE;
+    FG.flat_log_w = FG.flat_log_h = 0, FG.flat_layout = 0;
+}
+
+int flat_depth_create(const VkCtx *c, uint32_t w, uint32_t h) {
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                            .format = VK_FORMAT_R32_SFLOAT, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                     VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    if (vmaCreateImage(c->vma, &ci, &ai, &FG.flat_depth, &FG.flat_alloc, NULL) != VK_SUCCESS) {
+        FG.flat_depth = VK_NULL_HANDLE, FG.flat_alloc = VK_NULL_HANDLE;
+        rt_log("ffx: diagnostic flat FG depth %ux%u could not be allocated", w, h);
+        return 0;
+    }
+    return 1;
+}
+
+void flat_depth_prepare(VkCommandBuffer cb, uint32_t w, uint32_t h) {
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier2 b = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = FG.flat_layout ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+        .srcAccessMask = FG.flat_layout ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+        .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT, .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .oldLayout = FG.flat_layout ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = FG.flat_depth, .subresourceRange = range};
+    VkDependencyInfo d = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
+                          .pImageMemoryBarriers = &b};
+    vkCmdPipelineBarrier2(cb, &d);
+    VkClearColorValue clear = {.float32 = {0.75f, 0.f, 0.f, 0.f}};
+    vkCmdClearColorImage(cb, FG.flat_depth, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
+    b.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT, b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    b.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, b.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    b.oldLayout = b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    vkCmdPipelineBarrier2(cb, &d);
+    FG.flat_layout = 1;
+    if (FG.flat_log_w != w || FG.flat_log_h != h)
+        rt_log("ffx: diagnostic flat FG depth %ux%u cleared to 0.75", w, h), FG.flat_log_w = w, FG.flat_log_h = h;
 }
 
 FfxApiResource pic(const VkTmpPic *p, int write) {
@@ -254,6 +300,8 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
                              const VkTmpPic *out) {
     const char *full_mv = cfg_get("MKW_FG_DISPLAY_MV");
     int display_mv = full_mv && strcmp(full_mv, "0") && cfg_get("MKW_FG_NVOF") && strcmp(cfg_get("MKW_FG_NVOF"), "0");
+    const char *flat = cfg_get("MKW_FSR_FG_FLAT_DEPTH");
+    int use_flat_depth = flat && strcmp(flat, "0");
     if (!vk_tmp_ffx_load() || FG.failed) return 0;
     const VkCtx *c = vk_ctx();
     if (FG.ctx && (FG.w != bb->w || FG.h != bb->h || FG.fmt != bb->fmt || in->w > FG.rw || in->h > FG.rh)) fg_destroy();
@@ -289,6 +337,7 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
         vk_queue_lock();
         ffxReturnCode_t r = A.create(&FG.ctx, &d.header, nullptr);
         vkDeviceWaitIdle(c->device);
+        if (r == FFX_API_RETURN_OK && use_flat_depth) flat_depth_create(c, bb->w, bb->h);
         vk_queue_unlock();
         if (r != FFX_API_RETURN_OK) {
             FG.ctx = nullptr, FG.failed = 1;
@@ -352,6 +401,7 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
     }
     VkTmpRes rz = {in->depth, VK_FORMAT_R32_SFLOAT, in->w, in->h},
              rm = {in->mv, VK_FORMAT_R16G16_SFLOAT, display_mv ? bb->w : in->w, display_mv ? bb->h : in->h};
+    if (use_flat_depth && FG.flat_depth) flat_depth_prepare(cb, in->w, in->h), rz.image = FG.flat_depth;
     pr.depth = res(&rz, 0);
     pr.motionVectors = res(&rm, 0);
     const float *v = in->cam;
