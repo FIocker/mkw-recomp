@@ -692,6 +692,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             VkTmpFgInputs in;
             if (have_fgin || vk_tmp_fg_inputs(vk_fg_game_frame, &in)) {
                 if (have_fgin) in = fgin;
+                int full_mv_ready = 0;
                 static int of_jitter = -1;
                 if (of_jitter < 0) of_jitter = rt_knob("FG_NVOF_JITTER", "1");
                 if (F.of_active && of_motion_pass(cb, F.of_result.vectors, F.of_result.wblocks, F.of_result.hblocks,
@@ -701,6 +702,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                                                   !display_mv && RT_KNOB_ON(of_jitter) ? in.jx : 0.f,
                                                   !display_mv && RT_KNOB_ON(of_jitter) ? in.jy : 0.f)) {
                     in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
+                    full_mv_ready = display_mv;
                     static int told;
                     if (!told++) rt_log("vk: FSR motion from hardware optical flow, %ux%u cells of %u pixels",
                                         F.of_result.wblocks, F.of_result.hblocks, F.of_result.grid);
@@ -720,7 +722,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                 }
                 // The display-vector experiment describes a full-size motion resource to FSR. A failed OF setup
                 // must not expose the smaller camera-vector image under that description.
-                if (!display_mv || F.of_active) got = vk_tmp_ffx_fg(cb, &in, in_pic, in_hl, &outs[0]);
+                if (!display_mv || full_mv_ready) got = vk_tmp_ffx_fg(cb, &in, in_pic, in_hl, &outs[0]);
                 // Readback-only twin at the FSR frame's midpoint. FSR uses M[0]; this spare image never enters out[].
                 if (got == 1 && compare_native && !use_h && flow_ready) {
                     const float pc[4] = {0.5f, 1.0f / (16.0f * (float)gw), 1.0f / (16.0f * (float)gh), 0};

@@ -285,10 +285,14 @@ int vk_of_init(VkQueue of_queue, uint32_t of_family) {
         return 0;
     }
     if (!format_has(VK_FORMAT_R16G16_SFIXED5_NV,
-                    VK_FORMAT_FEATURE_2_OPTICAL_FLOW_VECTOR_BIT_NV | VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT)) {
+                    VK_FORMAT_FEATURE_2_OPTICAL_FLOW_VECTOR_BIT_NV | VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+                    VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT)) {
         rt_log("vk: hardware optical flow off: SFIXED5 cannot be copied from optical-flow output to storage");
         return 0;
     }
+    rt_log("vk: hardware optical-flow output view support: sampled %d storage %d",
+           format_has(VK_FORMAT_R16G16_SFIXED5_NV, VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT),
+           format_has(VK_FORMAT_R16G16_SFIXED5_NV, VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT));
     const char *requested_grid = cfg_get("MKW_FG_NVOF_GRID");
     unsigned requested = requested_grid ? (unsigned)strtoul(requested_grid, NULL, 10) : 4u;
     VkOpticalFlowGridSizeFlagsNV requested_bit = requested == 1 ? VK_OPTICAL_FLOW_GRID_SIZE_1X1_BIT_NV
@@ -397,7 +401,8 @@ static int ensure_resources(uint32_t width, uint32_t height) {
     const VkFormat flow_format = VK_FORMAT_R16G16_SFIXED5_NV;
     uint32_t wb = (width + O.grid - 1) / O.grid, hb = (height + O.grid - 1) / O.grid;
     if (!of_image_supported(input_format, VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV, VK_IMAGE_USAGE_STORAGE_BIT, width, height) ||
-        !of_image_supported(flow_format, VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, wb, hb)) {
+        !of_image_supported(flow_format, VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV,
+                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, wb, hb)) {
         rt_log("vk: hardware optical flow off for %ux%u: optical-flow image usage is unsupported", width, height);
         return 0;
     }
@@ -410,7 +415,9 @@ static int ensure_resources(uint32_t width, uint32_t height) {
                       VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV) ||
         !create_image(&O.luma[1], input_format, width, height, VK_IMAGE_USAGE_STORAGE_BIT,
                       VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV) ||
-        !create_image(&O.flow, flow_format, O.wblocks, O.hblocks, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        // The optical-flow session binds a view even though the port copies the output instead of sampling it.
+        // Transfer-only images cannot have a view (VUID-VkImageViewCreateInfo-image-04441).
+        !create_image(&O.flow, flow_format, O.wblocks, O.hblocks, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                       VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV) ||
         !create_buffer(O.wblocks, O.hblocks)) {
         rt_log("vk: hardware optical flow off for %ux%u: no memory for its images or vector buffer", width, height);
