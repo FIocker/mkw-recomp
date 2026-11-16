@@ -5,12 +5,12 @@ except `texpre_probe.c`, `fg_probe.c`, `fps_probe.c` and `discord_probe.c`.
 
 | File | Option | What it checks |
 |---|---|---|
-| `astc_probe.c` | `--probe-astc` | The compute ASTC decoder (`vk_astc.c`) against the CPU one, bit for bit, with synthetic blocks |
+| `astc_probe.c` | `--probe-astc` | The compute ASTC decoder (`vk_astc.c`) against the CPU one, bit for bit, with synthetic blocks; the BC7 and BC1 re-encoders, transparent texels keeping alpha 0 exactly |
 | `audio_probe.c` | `--probe-audio` | MKW's own: the SDK's translated `nn::audio` client against the objects of `audren_sf.c`: parameter, open, 200 updates at 5 ms, device and close (formerly `--probe-ipc`) |
 | `cfg_probe.c` | `--probe-cfg` | Reading the `.ini`, environment variables and a missing file (`cfg.c`) |
 | `fg_probe.c` | `--probe-framegen` | MKW's own: frame generation's passes (`vk_framegen.c`) on two pictures in `MKW_FG_PROBE` (from `tools/imagen/fg_check.py`), the frame halfway and the vectors of each level written back, and its GPU time |
 | `discord_probe.c` | `--probe-discord` | MKW's own: Discord Rich Presence (`core/presence`) against the Discord running on this machine: connects, shows each phase a few seconds, clears it |
-| `fps_probe.c` | `--probe-fps` | MKW's own: `MKW_FPS=auto`'s controller (`fps_auto.c`) on synthetic frame times: the interval each steady frame time settles on with no changes after, a loading hitch, a return to 60 |
+| `fps_probe.c` | `--probe-fps` | MKW's own: `MKW_FPS=auto`'s controller (`fps_auto.c`) on synthetic frame times: the interval each steady frame time settles on with no changes after, a loading hitch, a return to 60, stalls slower than any interval |
 | `oflow_probe.c` | `--probe-oflow` | Hardware optical flow on a known synthetic translation, vector sign/scale and timeline ordering (`MKW_FG_NVOF=1`), without game assets |
 | `fsr_fg_probe.c` | `--probe-fsr-fg` | Real FSR generation on an analytical moving plane, fixed object and shadow; compares geometry/image vectors (`MKW_FSR_PROBE_MV`) without assets or presentation. `MKW_FSR_PROBE_SIZE`/`FRAMES` select size and duration. Raw timing mode (`MKW_FSR_PROBE_INPUT_PREFIX`, suffixes in `FRAMES`) reads captured `vN.bin`/`zN.bin` instead; `MKW_FSR_PROBE_VECTOR=x,y` supplies a constant fractional control. Raw mode does not claim analytical quality |
 | `gfx_abi_probe.c` | `--probe-gfx-abi` | Our objects fit in NVN's and the fields the game reads are where it expects them |
@@ -21,5 +21,5 @@ except `texpre_probe.c`, `fg_probe.c`, `fps_probe.c` and `discord_probe.c`.
 | `ov_probe.c`, `ov_probe.h` | `--probe-services` | Each replacement of `runtime/sdk/` and NVN2's native images called through its synthetic address; a linked one the loaded game imports and no probe calls fails it |
 | `ov_mkw_probe.c`, `ov_mkw_list.h` | `--probe-services` | MKW's own: the replacements only MKW imports (offline network, account, `oe`, clock, touch, the VP9 decoder with frames the test encodes itself, and sockets over the host's loopback) |
 | `tex_probe.c` | `--probe-vkmem` | Texture memory: block-linear copies, ASTC, format table, imported pools |
-| `texpre_probe.c` | `--probe-texpre` | MKW's own: quality of the GPU BC7 against `bc7enc` on the game's textures, listed in `MKW_TEXPRE_PROBE_LIST` |
-| `vk_exec_probe.c` | `--probe-vkexec` | Vulkan replay: fence values, completion order, empty submits; `MKW_RTSTATS`'s rules on cleared targets; a pitch texture the GPU writes, in its pool bytes after the fence wait; which render targets count as rendered recently (one-shot draws) |
+| `texpre_probe.c` | `--probe-texpre` | MKW's own: quality of the GPU BC7 against `bc7enc` on the game's textures, listed in `MKW_TEXPRE_PROBE_LIST`: PSNR of RGBA and of premultiplied colour (what a blend shows) |
+| `vk_exec_probe.c` | `--probe-vkexec` | Vulkan replay: fence values, completion order, empty submits; `MKW_RTSTATS`'s rules on cleared targets; a pitch texture the GPU writes, in its pool bytes after the fence wait; which render targets count as rendered recently (one-shot draws); unwritten sparse small mips start at zero across allocation reuse and retain later writes |

@@ -28,6 +28,9 @@ void vk_tmp_shutdown(void);   // before the device goes
 int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs);
 int vk_tmp_dispatch(VkExec *ex, const GfxShader *cs);
 void vk_tmp_viewport(const VkExec *ex, VkViewport *v);
+// 1 while the upscaler is on: its hooks follow the frame's draws in order (the camera, the jitter, the SMAA blend before
+// the upscale dispatch, the last pass after it), so MKW_REPLAY_PAR records the submission serially (vk_exec_par.c).
+int vk_tmp_in_order(void);
 void vk_tmp_present(uint64_t frame);   // the replay thread, at each game present
 void vk_tmp_present_size(uint32_t w, uint32_t h);   // the size of the picture that present shows (the game output)
 // The screen target at the game output's size (vk_temporal.c): a colour target the frame's upscale replaced

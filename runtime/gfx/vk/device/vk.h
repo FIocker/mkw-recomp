@@ -316,6 +316,7 @@ void vram_log_now(void);                                  // the "mem: vram" rep
 const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void);
 void vk_headroom_start(void);
 void vk_tex_pool_start(void);   // MKW_VK_TEX_POOL_MIN: texture memory made at start (vk_tex_image.c)
+void vk_tex_pool_stop(void);    // after image destruction, before destroying the VMA allocator
 void vk_headroom_stop(void);   // before vmaDestroyAllocator
 int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out);   // 1 when all of [addr, addr+size) is backed
 int vk_mem_virt_phys(uint64_t addr, uint64_t *phys);   // virtual pool page at addr: 1 and the GPU address it maps to
@@ -325,7 +326,10 @@ int vk_mem_virt_phys(uint64_t addr, uint64_t *phys);   // virtual pool page at a
 // queue lock held, before each graphics-queue submission: the changed bindings (binds), behind every earlier submission,
 // and the wait and signal of that submission on the sparse order timeline.
 void vk_texture_report(uint64_t addr);   // MKW_CTL "tex ADDR": textures over addr (vk_texture.c)
-int vk_sparse_create(const VkImageCreateInfo *ci, const nvn_texdesc *d, uint64_t addr, uint64_t size, VkImage *img);
+typedef struct { uint32_t first; VkImageAspectFlags aspect; VkDeviceSize zero_bytes; } VkSparseTail;
+int vk_sparse_create(const VkImageCreateInfo *ci, const nvn_texdesc *d, uint64_t addr, uint64_t size, VkImage *img,
+                     VkSparseTail *tail);
+void vk_sparse_shutdown(void);   // after textures, retired work and device idle; before the VMA allocator
 uint64_t vk_sparse_destroy(VkImage img);   // the submission its binds are done by (0: none)
 int vk_sparse_is(VkImage img);   // 1: img is a sparse image made by vk_sparse_create
 void vk_sparse_remap(uint64_t addr, uint64_t size);

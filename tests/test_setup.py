@@ -426,3 +426,22 @@ def test_broken_spec_not_reused(tmp_path: Path, text: str) -> None:
     good = ROOT / "build/sm86/instructions.json"  # built on this machine, never in the repo
     if good.is_file():
         assert shaderstep.spec_loads(good)
+
+
+def test_chunk_key_ignores_generated_headers_it_does_not_include(tmp_path: Path) -> None:
+    """A new patch set rewrites the generated patches.h, which no chunk includes: it recompiled all 359 (16/11/2026)."""
+    gen = tmp_path / "gen"
+    (gen / "main").mkdir(parents=True)
+    patches, layout = gen / "patches.h", gen / "layout.h"
+    patches.write_text("#define RT_PATCH_COUNT 1\n")
+    layout.write_text("#define A 1\n")
+    chunk, uses = gen / "main/c0.c", gen / "main/c1.c"
+    chunk.write_text('#include "cpu.h"\n')
+    uses.write_text('#include "cpu.h"\n#include "layout.h"\n')
+    keys = lambda: [gamecode.chunk_base(["true"], "cpu", [layout, patches], s) for s in (chunk, uses)]  # noqa: E731
+    before = keys()
+    patches.write_text("#define RT_PATCH_COUNT 2\n")
+    assert keys() == before
+    layout.write_text("#define A 2\n")
+    after = keys()
+    assert after[0] == before[0] and after[1] != before[1]

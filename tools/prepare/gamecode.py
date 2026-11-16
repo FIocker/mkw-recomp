@@ -57,16 +57,22 @@ def compile_game(game: Path, exefs: Path, work: Path, cc: list[str], target: str
     # every folder with a runtime header the package carries (runtime/cpu, runtime/core/boot for gamelib.h), as build.py
     # does: a fixed list missed gamelib.h when it moved to core/boot (issue #1, v0.1.1)
     inc = [f"-I{d}" for d in sorted({p.parent for p in (ROOT / "runtime").rglob("*.h")})] + [f"-I{gen}"]
-    jobs_c = [(src, obj / f"{src.parent.name}_{src.stem}.o", [*flags, f"-I{ROOT / 'runtime/cpu'}"]) for src in srcs]
+    cpu = ROOT / "runtime/cpu"
+    jobs_c = [(src, obj / f"{src.parent.name}_{src.stem}.o", [*flags, f"-I{cpu}"]) for src in srcs]
     jobs_c.append((obj / "modules.c", obj / "modules.o", [*flags, gid, *inc]))
     jobs_c.sort(key=lambda j: -j[0].stat().st_size)  # the largest first: no 10 MB main_table.c alone at the end
     total, done = len(jobs_c) + 1, 0  # the link is the last unit: a progress bar full before it hid it (issue #2)
     extra = [str(package_dir(game) / "lib/libmkw.dll.a")] if windows else ["-Wl,-z,noexecstack"]
-    base = common_key(cc, gen)
+    # The chunks see runtime/cpu and only the generated headers they name: a new patch set changes the generated
+    # patches.h, which no chunk includes, and recompiled all 359 of them (PR 450 on 16/11/2026, 9 min on the 6-thread
+    # Windows PC). modules.c sees every folder and keeps the whole list.
+    base_all = common_key(cc, sorted((ROOT / "runtime").rglob("*.h")) + sorted(gen.rglob("*.h")))
+    base_cpu = common_key(cc, sorted(cpu.rglob("*.h")))
+    gen_headers = sorted(gen.rglob("*.h"))
 
     def one(job: tuple[Path, Path, list[str]]) -> str:
         src, out, f = job
-        key = object_key(base, src, f, gen)
+        key = object_key(base_all if src.parent == obj else chunk_base(cc, base_cpu, gen_headers, src), src, f, gen)
         stamp = out.with_suffix(".key")
         if out.is_file() and stamp.is_file() and stamp.read_text() == key:
             return ""
@@ -112,11 +118,22 @@ def compile_game(game: Path, exefs: Path, work: Path, cc: list[str], target: str
     (game / "mkwgame.id").write_text(build.game_id())  # runtime/core/boot/gamelib.c rt_game_present
 
 
-def common_key(cc: list[str], gen: Path) -> str:
-    """What every object depends on besides its own C and flags: the compiler and every header it can include (the
-    runtime's and the generated ones)."""
-    h = hashlib.sha256(subprocess.run([*cc, "--version"], capture_output=True, text=True, check=False).stdout.encode())
-    for p in sorted((ROOT / "runtime").rglob("*.h")) + sorted(gen.glob("*.h")):
+def chunk_base(cc: list[str], base_cpu: str, gen_headers: list[Path], src: Path) -> str:
+    """A chunk's common key: runtime/cpu's headers, plus the generated ones its C names."""
+    text = src.read_bytes()
+    named = [p for p in gen_headers if f'#include "{p.name}"'.encode() in text]
+    return common_key(cc, named, base_cpu) if named else base_cpu
+
+
+def common_key(cc: list[str], headers: list[Path], base: str = "") -> str:
+    """What an object depends on besides its own C and flags: the compiler (or `base`, a key that already holds it)
+    and every header it can include."""
+    h = hashlib.sha256(
+        base.encode()
+        if base
+        else subprocess.run([*cc, "--version"], capture_output=True, text=True, check=False).stdout.encode()
+    )
+    for p in headers:
         h.update(p.relative_to(p.parents[1]).as_posix().encode() + p.read_bytes())
     return h.hexdigest()
 
@@ -146,4 +163,3 @@ def probe_link(cc: list[str], obj: Path, windows: bool) -> None:
 def tail_of(out: str | bytes | None) -> str:
     text = out.decode(errors="replace") if isinstance(out, bytes) else out or ""
     return text.strip()[-300:] or "no output"
-

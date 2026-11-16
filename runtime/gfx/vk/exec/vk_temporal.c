@@ -470,6 +470,8 @@ static float halton(uint32_t i, uint32_t b) {
     return r;
 }
 
+int vk_tmp_in_order(void) { return __atomic_load_n(&T.engine, __ATOMIC_RELAXED) != VK_TMP_OFF; }
+
 void vk_tmp_viewport(const VkExec *ex, VkViewport *v) {
     (void)ex;
     if (!T.draw_jit) return;

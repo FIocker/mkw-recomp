@@ -33,7 +33,7 @@ static int save_ok = 1;                         // the last cfg_save_to wrote (o
 // Every name the runtime reads (and the patch sets in generated/), without the prefix. A file key outside this list is
 // logged as unknown. A new variable goes here too, or its ini key logs a harmless "unknown key" line.
 static const char *const known[] = {
-    "AB", "ANISO", "APP_POOL", "ASPECT", "ASSUME_FOCUS", "ASTC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_CHANNELS", "AUDIO_OFF", "AUDIO_PREFILL_MS",
+    "AB", "ANISO", "APP_POOL", "ASPECT", "ASSUME_FOCUS", "ASTC", "ASTC_BC1", "ASTC_BC7", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_CHANNELS", "AUDIO_OFF", "AUDIO_PREFILL_MS",
     "BACKGROUND_MUTE", "BACKGROUND_WINDOW", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
@@ -46,7 +46,7 @@ static const char *const known[] = {
     "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MODS", "MODS_ACK", "MODS_PLAYED", "MOTION",
     "MOUSE_SENS", "PLAYER",   // PLAYER: the launcher's choice (core/base/players.h), no row: Reset all leaves it
     "ONE_PER_CORE", "OPERATION_MODE", "PAD_LAYOUT", "PERF_OVERLAY", "PERF_SLOW_MS", "PICTURE_FIT", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SKIP", "PIPE_STALL", "PIPE_SYNC", "PIPE_TRACE", "POOL_SPILL", "PIPE_WAIT", "PIPE_WORKERS",
-    "PROBE", "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES",
+    "PROBE", "QUEUE_WAITS", "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES",
     "PROFILE_MAIN", "PROFILE_RENDER", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REEXEC",
     "BIND_XF", "REG_LATE", "REG_QUEUED", "REPLAY_ASYNC", "USNAP_CMP",
     "REPLAY_CHECK", "RESOLUTION", "RESOLVE_CHECK", "ROMFS", "RTSTATS", "ROMFS_MODS", "ROMFS_PATCHES",
