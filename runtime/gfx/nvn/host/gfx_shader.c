@@ -9,6 +9,7 @@
 //
 // Provenance: the c2 handle ranges of handle_slot are those of MacNativeGames' mkw_xlate Service.cs (MIT).
 #include <ctype.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -671,9 +672,11 @@ const GfxShader *gfx_shader_variant(const GfxShader *s, const uint32_t *val, con
         free(w);
         return NULL;
     }
-    GfxShader *v = malloc(sizeof *v);
+    GfxShader *v = calloc(1, sizeof *v);
     if (!v) rt_fatal("gfx_shader: out of memory");
-    *v = *s;
+    // Another replay worker can memoize the generic program's hash while this
+    // variant is made. Do not read that atomic memo through a whole-struct copy.
+    memcpy(v, s, offsetof(GfxShader, spirv_fnv));
     v->next = NULL, v->spirv = w, v->variant_of = s, v->spirv_fnv = 0;   // its own SPIR-V
     size_t n = 32 + (size_t)s->nspec * 5;
     uint8_t *buf = malloc(n);
