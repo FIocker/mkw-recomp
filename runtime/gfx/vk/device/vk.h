@@ -1,6 +1,29 @@
 // Vulkan-internal header of the graphics layer. Host code only; the guest never sees it.
 #pragma once
 #include <vulkan/vulkan.h>
+
+// VK_NV_compute_occupancy_priority (frame generation's compute, vk_framegen.c) is newer than the release's Linux
+// sysroot headers (VK_HEADER_VERSION 309, tools/build/sysroot.py): its definitions as Khronos' vulkan_core.h 363 has
+// them, so the player's build compiles (PR 462 review: the --dist runtime failed in vk_device.c and vk_framegen.c)
+#ifndef VK_NV_compute_occupancy_priority
+#define VK_NV_compute_occupancy_priority 1
+#define VK_NV_COMPUTE_OCCUPANCY_PRIORITY_EXTENSION_NAME "VK_NV_compute_occupancy_priority"
+#define VK_STRUCTURE_TYPE_COMPUTE_OCCUPANCY_PRIORITY_PARAMETERS_NV ((VkStructureType)1000645000)
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_OCCUPANCY_PRIORITY_FEATURES_NV ((VkStructureType)1000645001)
+typedef struct VkComputeOccupancyPriorityParametersNV {
+    VkStructureType sType;
+    const void *pNext;
+    float occupancyPriority;
+    float occupancyThrottling;
+} VkComputeOccupancyPriorityParametersNV;
+typedef struct VkPhysicalDeviceComputeOccupancyPriorityFeaturesNV {
+    VkStructureType sType;
+    void *pNext;
+    VkBool32 computeOccupancyPriority;
+} VkPhysicalDeviceComputeOccupancyPriorityFeaturesNV;
+typedef void(VKAPI_PTR *PFN_vkCmdSetComputeOccupancyPriorityNV)(VkCommandBuffer commandBuffer,
+                                                                 const VkComputeOccupancyPriorityParametersNV *pParameters);
+#endif
 #include "vk_destroy_count.h"
 #include <stdint.h>
 #pragma clang diagnostic push
