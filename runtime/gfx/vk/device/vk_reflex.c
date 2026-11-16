@@ -205,7 +205,8 @@ void vk_reflex_swapchain_detach(VkReflex *reflex, VkReflexSwapchain *swapchain) 
 
     if (swapchain->sleep_signal_pending && wait_device_idle(reflex) == VK_SUCCESS)
         settle_sleep_signal(reflex, swapchain);
-    VkResult rc = reflex->set_mode(reflex->device, swapchain->swapchain, NULL);
+    VkLatencySleepModeInfoNV off = {.sType = VK_STRUCTURE_TYPE_LATENCY_SLEEP_MODE_INFO_NV};   // not NULL: see set_mode
+    VkResult rc = reflex->set_mode(reflex->device, swapchain->swapchain, &off);
     if (rc != VK_SUCCESS && plat_xchg32(&reflex->mode_error_logged, 1) == 0) {
         rt_log("vk: Reflex could not disable low latency for a retiring swapchain (%d)", (int)rc);
     }
@@ -229,7 +230,10 @@ VkResult vk_reflex_set_mode(VkReflex *reflex, VkReflexSwapchain *swapchain, VkRe
         .lowLatencyBoost = mode == VK_REFLEX_BOOST,
         .minimumIntervalUs = mode == VK_REFLEX_OFF ? 0 : minimum_interval_us,
     };
-    VkResult r = reflex->set_mode(reflex->device, swapchain->swapchain, mode == VK_REFLEX_OFF ? NULL : &info);
+    // Off as a mode of its own rather than NULL, which the spec allows too: NVIDIA's driver 621.01 (RTX 5080) reads the
+    // three fields through the pointer it was given and NULL crashed it (nvoglv64.dll, a read at offset 0x18) when
+    // Reflex was switched off in the F1 menu.
+    VkResult r = reflex->set_mode(reflex->device, swapchain->swapchain, &info);
     if (r == VK_SUCCESS) {
         plat_mutex_lock(&reflex->lock);
         swapchain->mode = mode;
