@@ -9,6 +9,7 @@
 // the last. Every image of the replay stays in VK_IMAGE_LAYOUT_GENERAL, which FFX calls the common state.
 #ifdef _WIN32
 #include <windows.h>
+#include "ffx_game_field_spv.h"
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +30,7 @@ extern "C" {
 
 namespace {
 
-struct {
+struct FfxApi {
     void *lib = nullptr;
     PfnFfxCreateContext create = nullptr;
     PfnFfxDestroyContext destroy = nullptr;
@@ -37,7 +38,10 @@ struct {
     PfnFfxQuery query = nullptr;
     PfnFfxDispatch dispatch = nullptr;
     int tried = 0, ok = 0, legacy = 0;   // legacy: amd_fidelityfx_vk.dll, which takes the deprecated backend descriptor
-} A;
+    char path[1024] = {};
+};
+FfxApi A;   // the upscaler provider, and the standard frame-generation provider
+FfxApi B;   // opt-in MKW_FFX_FG_LIBRARY provider for frame generation only
 
 // a few contexts at once, as vk_temporal.c keeps DLSS features: the game's upscale writes the output texture itself in
 // some frames, of another size than the screen target
@@ -152,6 +156,167 @@ int context_for(uint32_t mw, uint32_t mh, uint32_t ow, uint32_t oh, int hdr, int
     return 1;
 }
 
+#ifdef _WIN32
+// Diagnostic source-shader substitution on the standard provider. Exact byte matching keeps another SDK
+// version or permutation from receiving a shader with incompatible descriptors or constant-buffer layout.
+struct ShaderReplacement {
+    uint32_t *original = nullptr;
+    const uint32_t *replacement = nullptr;
+    size_t original_size = 0, replacement_size = 0;
+    int tried = 0, packaged = 0;
+} shader_replacement;
+
+uint32_t *read_sdk_shader(const char *path, size_t *size) {
+    if (!path || !*path) return nullptr;
+    FILE *file = fopen(path, "rb");
+    if (!file) return nullptr;
+    fseek(file, 0, SEEK_END);
+    long length = ftell(file);
+    rewind(file);
+    uint32_t *data = length >= 20 && length <= 2097152 && !(length % 4)
+                         ? (uint32_t *)malloc((size_t)length) : nullptr;
+    int ok = data && fread(data, 1, (size_t)length, file) == (size_t)length && data[0] == 0x07230203;
+    fclose(file);
+    if (!ok) { free(data); return nullptr; }
+    *size = (size_t)length;
+    return data;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL dump_fg_shader(VkDevice device, const VkShaderModuleCreateInfo *info,
+                                             const VkAllocationCallbacks *allocation, VkShaderModule *module) {
+    const char *directory = cfg_get("MKW_FFX_SPIRV_DUMP");
+    if (directory && *directory && info && info->pCode) {
+        static unsigned number;
+        char path[1400];
+        snprintf(path, sizeof path, "%s/ffx-%03u.spv", directory, number++);
+        FILE *file = fopen(path,"wb");
+        if (file) {
+            size_t written = fwrite(info->pCode,1,info->codeSize,file);
+            fclose(file);
+            rt_log("ffx[fg]: SDK shader %s, %zu/%zu bytes",path,written,info->codeSize);
+        } else rt_log("ffx[fg]: could not write diagnostic SDK shader %s",path);
+    }
+    auto &patch = shader_replacement;
+    if (!patch.tried) {
+        patch.tried = 1;
+        const char *original = cfg_get("MKW_FFX_REPLACE_ORIGINAL");
+        const char *replacement = cfg_get("MKW_FFX_REPLACE_SPIRV");
+        patch.packaged = !original && !replacement;
+        if (patch.packaged) {
+            patch.replacement = ffx_game_field_spv;
+            patch.replacement_size = sizeof ffx_game_field_spv;
+        } else {
+            patch.original = read_sdk_shader(original, &patch.original_size);
+            patch.replacement = read_sdk_shader(replacement, &patch.replacement_size);
+        }
+        if (patch.packaged && patch.replacement) {
+            // Reproducible tools/ffx output from the pinned source, patch and compiler. Reject another payload
+            // even if it happens to have the same descriptor layout as the original SDK stage.
+            static const uint8_t expected[32] = {
+                0x1d,0x7e,0x3e,0x8d,0x3b,0x70,0x46,0x76,0x4a,0x2a,0x9f,0x98,0xf5,0xe0,0x41,0x47,
+                0xbe,0xfa,0xf4,0xb0,0xea,0x4f,0x9f,0xa0,0x17,0x24,0x2f,0x98,0x24,0xaf,0x5c,0x6e};
+            uint8_t digest[32];
+            rt_sha256(patch.replacement, patch.replacement_size, digest);
+            if (memcmp(digest, expected, sizeof digest)) {
+                rt_log("ffx[fg]: packaged game-vector shader does not match the verified source build");
+                patch.replacement = nullptr;
+            }
+        }
+        if (!patch.packaged && (!patch.original || !patch.replacement))
+            rt_log("ffx[fg]: source-shader substitution unavailable (both valid SPIR-V paths required)");
+    }
+    int match = info && patch.original && info->codeSize == patch.original_size &&
+                !memcmp(info->pCode, patch.original, patch.original_size);
+    if (info && patch.packaged && patch.replacement && info->codeSize == 14952) {
+        // MIT SDK 7539ae8b, official 3.1.6 FP32 game-vector field: original CB256/UAV128..129 layout.
+        // A different shader permutation/version remains untouched; a byte length alone is never sufficient.
+        static const uint8_t expected[32] = {
+            0x1e,0xc9,0xa6,0x37,0x13,0x64,0x9e,0xa0,0x50,0x35,0x06,0xf8,0x44,0xfa,0xc7,0x64,
+            0x98,0x76,0x9d,0xf0,0x0c,0x45,0x2d,0x0b,0x2a,0x62,0xb0,0x7a,0xae,0x15,0x46,0xa0};
+        uint8_t digest[32];
+        rt_sha256(info->pCode, info->codeSize, digest);
+        match = !memcmp(digest, expected, sizeof digest);
+    }
+    if (match && patch.replacement) {
+        VkShaderModuleCreateInfo replaced = *info;
+        replaced.pCode = patch.replacement, replaced.codeSize = patch.replacement_size;
+        rt_log("ffx[fg]: exact source-shader substitution %zu -> %zu bytes%s", info->codeSize,
+               patch.replacement_size, patch.packaged ? " (embedded still-motion priority fix)" : "");
+        return vkCreateShaderModule(device, &replaced, allocation, module);
+    }
+    return vkCreateShaderModule(device,info,allocation,module);
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fg_device_proc(VkDevice device, const char *name) {
+    if (!strcmp(name,"vkCreateShaderModule")) return (PFN_vkVoidFunction)dump_fg_shader;
+    return vkGetDeviceProcAddr(device,name);
+}
+#endif
+
+PFN_vkGetDeviceProcAddr fg_proc_address() {
+#ifdef _WIN32
+    const char *fix = cfg_get("MKW_FFX_STILL_TIE");
+    if (!(fix && !strcmp(fix, "0"))) return fg_device_proc;
+#endif
+    return vkGetDeviceProcAddr;
+}
+
+#ifdef _WIN32
+void load_api_exports(FfxApi &api, HMODULE lib) {
+    api.create = (PfnFfxCreateContext)(void *)GetProcAddress(lib, "ffxCreateContext");
+    api.destroy = (PfnFfxDestroyContext)(void *)GetProcAddress(lib, "ffxDestroyContext");
+    api.configure = (PfnFfxConfigure)(void *)GetProcAddress(lib, "ffxConfigure");
+    api.query = (PfnFfxQuery)(void *)GetProcAddress(lib, "ffxQuery");
+    api.dispatch = (PfnFfxDispatch)(void *)GetProcAddress(lib, "ffxDispatch");
+    api.ok = api.create && api.destroy && api.configure && api.query && api.dispatch;
+}
+
+int absolute_library_path(const char *path) {
+    int drive = ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+                path[1] == ':' && (path[2] == '\\' || path[2] == '/');
+    int unc = (path[0] == '\\' || path[0] == '/') && (path[1] == '\\' || path[1] == '/');
+    return drive || unc;
+}
+
+FfxApi *load_explicit_fg_api(const char *override) {
+    if (B.tried) return B.ok ? &B : nullptr;
+    B.tried = 1;
+    snprintf(B.path, sizeof B.path, "%s", override);
+    if (!absolute_library_path(B.path)) {
+        rt_log("ffx[fg]: explicit library %s is not an absolute path; frame generation is unavailable", B.path);
+        return nullptr;
+    }
+    HMODULE m = LoadLibraryA(B.path);
+    if (!m) {
+        rt_log("ffx[fg]: explicit library %s could not be loaded (%lu); frame generation is unavailable",
+               B.path, GetLastError());
+        return nullptr;
+    }
+    B.lib = m;
+    B.legacy = 0;
+    load_api_exports(B, m);
+    rt_log("ffx[fg]: %s %s", B.path,
+           B.ok ? "loaded" : "lacks one or more of the five API entry points: frame generation is unavailable");
+    return B.ok ? &B : nullptr;
+}
+#endif
+
+FfxApi *fg_api() {
+    const char *override = cfg_get("MKW_FFX_FG_LIBRARY");
+    if (override && *override) {
+#ifdef _WIN32
+        return load_explicit_fg_api(override);
+#else
+        return nullptr;
+#endif
+    }
+    if (!vk_tmp_ffx_load()) return nullptr;
+    static int told;
+    if (!told++)
+        rt_log("ffx[fg]: using the upscaler API selection from %s (standard provider)", A.path);
+    return &A;
+}
+
 }  // namespace
 
 extern "C" int vk_tmp_ffx_load(void) {
@@ -183,13 +348,10 @@ extern "C" int vk_tmp_ffx_load(void) {
         return 0;
     }
     A.lib = m;
-    A.create = (PfnFfxCreateContext)(void *)GetProcAddress(m, "ffxCreateContext");
-    A.destroy = (PfnFfxDestroyContext)(void *)GetProcAddress(m, "ffxDestroyContext");
-    A.configure = (PfnFfxConfigure)(void *)GetProcAddress(m, "ffxConfigure");
-    A.query = (PfnFfxQuery)(void *)GetProcAddress(m, "ffxQuery");
-    A.dispatch = (PfnFfxDispatch)(void *)GetProcAddress(m, "ffxDispatch");
-    A.ok = A.create && A.destroy && A.dispatch;
-    rt_log("ffx: %s %s", path, A.ok ? "loaded" : "lacks the API entry points: FSR 3.1 unavailable");
+    snprintf(A.path, sizeof A.path, "%s", path);
+    load_api_exports(A, m);
+    rt_log("ffx[sr]: %s %s", A.path,
+           A.ok ? "loaded" : "lacks one or more of the five API entry points: FSR 3.1 unavailable");
 #else
     rt_log("ffx: FSR 3.1 is only wired on Windows in this build");
 #endif
@@ -239,6 +401,7 @@ extern "C" int vk_tmp_ffx_upscale(VkCommandBuffer cb, const VkTmpRes *color, con
 namespace {
 struct {
     ffxContext ctx = nullptr;
+    FfxApi *api = nullptr;   // the API that created ctx, and must destroy it
     uint32_t w = 0, h = 0, rw = 0, rh = 0;
     VkFormat fmt = VK_FORMAT_UNDEFINED;
     VkImage flat_depth = VK_NULL_HANDLE;
@@ -251,12 +414,13 @@ struct {
 
 void fg_destroy() {
     if (!FG.ctx && !FG.flat_depth) return;
+    FfxApi *api = FG.api;
     vk_queue_lock();   // the present thread, as vk_framegen.c ensure_images
     vkDeviceWaitIdle(vk_ctx()->device);
     if (FG.flat_depth) vmaDestroyImage(vk_ctx()->vma, FG.flat_depth, FG.flat_alloc);
     vk_queue_unlock();
-    if (FG.ctx) A.destroy(&FG.ctx, nullptr);
-    FG.ctx = nullptr, FG.flat_depth = VK_NULL_HANDLE, FG.flat_alloc = VK_NULL_HANDLE;
+    if (FG.ctx && api) api->destroy(&FG.ctx, nullptr);
+    FG.ctx = nullptr, FG.api = nullptr, FG.flat_depth = VK_NULL_HANDLE, FG.flat_alloc = VK_NULL_HANDLE;
     FG.flat_log_w = FG.flat_log_h = 0, FG.flat_layout = 0;
 }
 
@@ -312,15 +476,20 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
     int display_mv = full_mv && strcmp(full_mv, "0") && cfg_get("MKW_FG_NVOF") && strcmp(cfg_get("MKW_FG_NVOF"), "0");
     const char *flat = cfg_get("MKW_FSR_FG_FLAT_DEPTH");
     int use_flat_depth = flat && strcmp(flat, "0");
-    if (!vk_tmp_ffx_load() || FG.failed) return 0;
+    if (FG.failed) return 0;
+    FfxApi *api = fg_api();
+    if (!api) {
+        FG.failed = 1;
+        return 0;
+    }
     const VkCtx *c = vk_ctx();
     if (FG.ctx && (FG.w != bb->w || FG.h != bb->h || FG.fmt != bb->fmt || in->w > FG.rw || in->h > FG.rh)) fg_destroy();
     if (!FG.ctx) {
         ffxCreateContextDescFrameGeneration d = {};
         d.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
-        ffxCreateContextDescFrameGenerationVersion api = {};
-        api.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION;
-        api.version = FFX_FRAMEGENERATION_VERSION;
+        ffxCreateContextDescFrameGenerationVersion api_version = {};
+        api_version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION;
+        api_version.version = FFX_FRAMEGENERATION_VERSION;
         int hdr = bb->fmt != VK_FORMAT_R8G8B8A8_UNORM && bb->fmt != VK_FORMAT_R8G8B8A8_SRGB;
         d.flags = hdr ? FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE : 0;
         if (display_mv) d.flags |= FFX_FRAMEGENERATION_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS;
@@ -329,23 +498,23 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
         d.backBufferFormat = surface(bb->fmt);
         ffxCreateBackendVKDesc be = {};
         ffxCreateBackendVKDesc_DEPRECATED old = {};
-        if (A.legacy) {
+        if (api->legacy) {
             old.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_DEPRECATED;
-            old.vkDevice = c->device, old.vkPhysicalDevice = c->phys, old.vkDeviceProcAddr = vkGetDeviceProcAddr;
-            api.header.pNext = &old.header;
+            old.vkDevice = c->device, old.vkPhysicalDevice = c->phys, old.vkDeviceProcAddr = fg_proc_address();
+            api_version.header.pNext = &old.header;
         } else {
             be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
             be.deviceContext.vkDevice = c->device, be.deviceContext.vkPhysicalDevice = c->phys;
-            be.deviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
-            api.header.pNext = &be.header;
+            be.deviceContext.vkDeviceProcAddr = fg_proc_address();
+            api_version.header.pNext = &be.header;
         }
         // SDK 2.1+ requires the application API version in the creation chain for new frame-generation APIs.
         // Keep the backend chained after it so PrepareV2's camera data is interpreted under the declared contract.
-        d.header.pNext = &api.header;
+        d.header.pNext = &api_version.header;
         // under the queue lock, and finished before it is let go: FFX's backend may submit its own setup work to the
         // device's queue while it makes the context (two runs faulted on a write to address 0 at the first frame)
         vk_queue_lock();
-        ffxReturnCode_t r = A.create(&FG.ctx, &d.header, nullptr);
+        ffxReturnCode_t r = api->create(&FG.ctx, &d.header, nullptr);
         vkDeviceWaitIdle(c->device);
         if (r == FFX_API_RETURN_OK && use_flat_depth) flat_depth_create(c, bb->w, bb->h);
         vk_queue_unlock();
@@ -356,12 +525,13 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
             return 0;
         }
         FG.w = bb->w, FG.h = bb->h, FG.rw = bb->w, FG.rh = bb->h, FG.fmt = bb->fmt, FG.id = 0;
-        rt_log("ffx: FSR 3.1 frame generation context %ux%u", bb->w, bb->h);
-        if (A.query) {
+        FG.api = api;
+        rt_log("ffx[fg]: FSR 3.1 frame generation context %ux%u via %s", bb->w, bb->h, api->path);
+        if (api->query) {
             ffxQueryGetProviderVersion version = {};
             version.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
-            if (A.query(&FG.ctx, &version.header) == FFX_API_RETURN_OK)
-                rt_log("ffx: selected frame-generation provider %s (id %llu)",
+            if (api->query(&FG.ctx, &version.header) == FFX_API_RETURN_OK)
+                rt_log("ffx[fg]: selected provider %s (id %llu)",
                        version.versionName ? version.versionName : "unnamed", (unsigned long long)version.versionId);
         }
     }
@@ -382,7 +552,7 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
     // the picture without the HUD (vk_tmp_fg_hudless; bb's format and size): FSR 3.1 takes the HUD from the
     // difference and keeps it out of the interpolation
     if (hl) cf.HUDLessColor = pic(hl, 0);
-    ffxReturnCode_t r = A.configure(&FG.ctx, &cf.header);
+    ffxReturnCode_t r = api->configure(&FG.ctx, &cf.header);
     if (r != FFX_API_RETURN_OK) {
         FG.failed = 1;
         rt_log("ffx: frame generation configure failed (%u): the port's own frame generation", r);
@@ -419,7 +589,7 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
         pr.cameraRight[i] = v[i], pr.cameraUp[i] = v[4 + i], pr.cameraForward[i] = -v[8 + i];
         pr.cameraPosition[i] = -(v[i] * v[3] + v[4 + i] * v[7] + v[8 + i] * v[11]);
     }
-    r = A.dispatch(&FG.ctx, &pr.header);
+    r = api->dispatch(&FG.ctx, &pr.header);
     if (r != FFX_API_RETURN_OK) {
         if (FG.evals < 4) rt_log("ffx: frame generation prepare failed (%u)", r);
         return 0;
@@ -440,7 +610,7 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
     g.minMaxLuminance[0] = hdr ? 0.001f : 0.f, g.minMaxLuminance[1] = hdr ? (peak ? (float)peak : 1000.f) : 1.f;
     g.generationRect = {0, 0, (int32_t)bb->w, (int32_t)bb->h};
     g.frameID = FG.id;
-    r = A.dispatch(&FG.ctx, &g.header);
+    r = api->dispatch(&FG.ctx, &g.header);
     if (r != FFX_API_RETURN_OK) {
         if (FG.evals < 4) rt_log("ffx: frame generation dispatch failed (%u)", r);
         return 0;
@@ -452,5 +622,6 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
 }
 
 extern "C" void vk_tmp_ffx_shutdown(void) {
-    if (A.ok) destroy_ctx(), fg_destroy();
+    if (A.ok) destroy_ctx();
+    fg_destroy();
 }

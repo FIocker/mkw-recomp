@@ -61,6 +61,7 @@ static struct {
     uint64_t of_last_frame;
     int of_active, of_hudless;
     VkTmpFgInputs of_prev;                // the previous present-thread inputs, when replay metadata has moved on
+    VkTmpFgInputs sdk_inputs;             // exact inputs selected for the current real FSR dispatch (diagnostic)
     int of_prev_ok;
     VkSampler sampler;
     VkCommandPool pool;
@@ -331,7 +332,10 @@ static int ensure_fsr_motion(VkCtx *c, int w, int h) {
     vk_queue_unlock();
     free_img(c, &F.fsr_mv);
     F.mv_w = F.mv_h = 0;
-    if (!make_img(c, &F.fsr_mv, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return 0;
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    const char *dump_inputs = cfg_get("MKW_FG_DUMP_INPUTS");
+    if (dump_inputs && strcmp(dump_inputs,"0")) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (!make_img(c, &F.fsr_mv, (uint32_t)w, (uint32_t)h, VK_FORMAT_R16G16_SFLOAT, usage)) return 0;
     F.mv_w = w, F.mv_h = h;
     return 1;
 }
@@ -631,7 +635,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     if (zero_mv_mode < 0) zero_mv_mode = rt_knob("FG_ZERO_MV", "0");
     int zero_mv = eng == 2 && RT_KNOB_ON(zero_mv_mode);   // diagnostic: isolate game vectors from SDK optical flow
     static int of_mode = -1;
-    if (of_mode < 0) of_mode = rt_knob("FG_NVOF", "0");
+    if (of_mode < 0) of_mode = rt_knob("FG_NVOF", "1");
     int of_wanted = eng == 2 && RT_KNOB_ON(of_mode) && c->has_oflow && F.split;
     static int display_mv_mode = -1;
     if (display_mv_mode < 0) display_mv_mode = rt_knob("FG_DISPLAY_MV", "0");
@@ -639,7 +643,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     VkTmpFgInputs fgin = {0};
     int have_fgin = made && (flow_mv || zero_mv || of_wanted) && vk_tmp_fg_inputs(vk_fg_game_frame, &fgin);
     int mv_ready = 0;
-    if (have_fgin && !fgin.reset && ensure_fsr_motion(c, display_mv ? cw : (int)fgin.w, display_mv ? ch : (int)fgin.h)) {
+    if (have_fgin && (!fgin.reset || zero_mv) && ensure_fsr_motion(c, display_mv ? cw : (int)fgin.w, display_mv ? ch : (int)fgin.h)) {
         img_barrier(cb, F.fsr_mv.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_NONE, 0,
                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                     VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
@@ -759,7 +763,14 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                 int full_mv_ready = 0;
                 static int of_jitter = -1;
                 if (of_jitter < 0) of_jitter = rt_knob("FG_NVOF_JITTER", "1");
-                if (F.of_active && of_motion_pass(cb, &in, cached_prev,
+                // The zero-vector diagnostic must override hardware flow, including reset frames.
+                if (mv_ready && zero_mv) {
+                    VkClearColorValue zero = {.float32 = {0.f, 0.f, 0.f, 0.f}};
+                    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    vkCmdClearColorImage(cb, F.fsr_mv.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+                    mem_barrier(cb);
+                    in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
+                } else if (F.of_active && of_motion_pass(cb, &in, cached_prev,
                                                   F.of_hudless ? H->view : F.pic[cur].view,
                                                   F.of_hudless ? (use_h ? F.hhlp.view : F.hlp.view) : F.pic[prev].view,
                                                   F.of_result.vectors, F.of_result.wblocks,
@@ -773,12 +784,6 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                     static int told;
                     if (!told++) rt_log("vk: FSR motion from hardware optical flow, %ux%u cells of %u pixels",
                                         F.of_result.wblocks, F.of_result.hblocks, F.of_result.grid);
-                } else if (mv_ready && zero_mv) {
-                    VkClearColorValue zero = {.float32 = {0.f, 0.f, 0.f, 0.f}};
-                    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                    vkCmdClearColorImage(cb, F.fsr_mv.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
-                    mem_barrier(cb);
-                    in.mv = F.fsr_mv.img, in.mv_view = F.fsr_mv.view;
                 } else if (mv_ready && flow_ready && !in.reset) {
                     static int still_mode = -1;
                     if (still_mode < 0) still_mode = rt_knob("FG_STILL_MV", "0");
@@ -789,7 +794,10 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                 }
                 // The display-vector experiment describes a full-size motion resource to FSR. A failed OF setup
                 // must not expose the smaller camera-vector image under that description.
-                if (!display_mv || full_mv_ready) got = vk_tmp_ffx_fg(cb, &in, in_pic, in_hl, &outs[0]);
+                if (!display_mv || full_mv_ready) {
+                    F.sdk_inputs = in;
+                    got = vk_tmp_ffx_fg(cb, &in, in_pic, in_hl, &outs[0]);
+                }
                 // Readback-only twin at the FSR frame's midpoint. FSR uses M[0]; this spare image never enters out[].
                 if (got == 1 && compare_native && !use_h && flow_ready) {
                     const float pc[4] = {0.5f, 1.0f / (16.0f * (float)gw), 1.0f / (16.0f * (float)gh), 0};
@@ -918,6 +926,8 @@ static struct {
     int n[DUMP_N], hl[DUMP_N], ref[DUMP_N], depth[DUMP_N], w, h;
     float near_[DUMP_N], far_[DUMP_N];
     VkTmpFgInputs inputs[DUMP_N];
+    VkTmpFgInputs sdk[DUMP_N];
+    int raw[DUMP_N];
     int nv[DUMP_N];
     uint32_t grid[DUMP_N][3];
     VkFormat fmt;   // exact presented encoding, including packed HDR10 readback
@@ -928,7 +938,9 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
         const char *e = cfg_get("MKW_FG_DUMP");
         D.at = e && atoll(e) > 0 ? (uint64_t)atoll(e) : UINT64_MAX;
     }
-    VkDeviceSize part = (VkDeviceSize)w * h * 20 + 64;   // fifth plane includes sparse depth and full-grid raw flow
+    const char *raw_env = cfg_get("MKW_FG_DUMP_INPUTS");
+    int raw_inputs = raw_env && strcmp(raw_env,"0");
+    VkDeviceSize part = (VkDeviceSize)w * h * (raw_inputs ? 28 : 20) + 64;
     if (F.frames < D.at || F.frames >= D.at + DUMP_N || (D.buf && (D.w != w || D.h != h))) return 0;
     if (vk_fg_out_format != VK_FORMAT_R8G8B8A8_UNORM && vk_fg_out_format != VK_FORMAT_A2B10G10R10_UNORM_PACK32) return 0;
     D.fmt = vk_fg_out_format;
@@ -979,6 +991,17 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
         D.grid[k][0] = F.of_result.wblocks, D.grid[k][1] = F.of_result.hblocks, D.grid[k][2] = F.of_result.grid;
         VkBufferCopy copy = {.srcOffset = 0, .dstOffset = base + (VkDeviceSize)w * h * 16 + 64, .size = nv_bytes};
         vkCmdCopyBuffer(cb, F.of_result.vectors, D.buf, 1, &copy);
+    }
+    D.raw[k] = raw_inputs && F.sdk_inputs.frame == vk_fg_game_frame &&
+               (VkDeviceSize)F.sdk_inputs.w * F.sdk_inputs.h <= (VkDeviceSize)w * h;
+    if (D.raw[k]) {
+        D.sdk[k] = F.sdk_inputs;
+        VkBufferImageCopy copy = {.bufferOffset = base + (VkDeviceSize)w*h*20 + 64,
+            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},
+            .imageExtent = {D.sdk[k].w,D.sdk[k].h,1}};
+        vkCmdCopyImageToBuffer(cb,D.sdk[k].depth,VK_IMAGE_LAYOUT_GENERAL,D.buf,1,&copy);
+        copy.bufferOffset = base + (VkDeviceSize)w*h*24 + 64;
+        vkCmdCopyImageToBuffer(cb,D.sdk[k].mv,VK_IMAGE_LAYOUT_GENERAL,D.buf,1,&copy);
     }
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
@@ -1042,6 +1065,22 @@ static void dump_write(VkFence fence) {
                    (size_t)D.grid[f][0] * D.grid[f][1], file);
             fclose(file);
         }
+    }
+    for (int f = 0; f < DUMP_N; f++) if (D.raw[f]) {
+        const VkTmpFgInputs *in = &D.sdk[f];
+        uint32_t size[2] = {in->w,in->h};
+        for (int type = 0; type < 2; type++) {
+            snprintf(path,sizeof path,"%s/%c%llu.bin",dir,type ? 'v' : 'z',(unsigned long long)(D.at+f));
+            FILE *file = fopen(path,"wb");
+            if (file) {
+                fwrite(size,sizeof(uint32_t),2,file);
+                fwrite((const uint8_t*)D.map+(size_t)D.stride*f+px*(size_t)(type ? 6 : 5)+64,4,
+                       (size_t)in->w*in->h,file);
+                fclose(file);
+            }
+        }
+        rt_log("fg sdk inputs: capture %llu game %llu %ux%u near %.8g far %.8g jitter %.8g %.8g reset %d",
+               (unsigned long long)(D.at+f),(unsigned long long)in->frame,in->w,in->h,in->near_,in->far_,in->jx,in->jy,in->reset);
     }
     rt_log("vk: frame generation: game frames %llu-%llu written to %s (interval %.1f ms)", (unsigned long long)D.at,
            (unsigned long long)(D.at + DUMP_N - 1), dir, F.interval / 1e6);

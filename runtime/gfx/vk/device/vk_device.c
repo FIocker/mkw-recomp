@@ -278,8 +278,11 @@ static int create_device(void) {
         if (has_ext(ep, ne, name)) { g_vk.flag = 1; ext[n_ext++] = name; CHAIN(member, stype); } } while (0)
     // Recent DXC gives the SDK's SPD QuadReadAcross operations explicit linear compute-quad semantics. Keep the
     // optional capability confined to source-provider experiments; ordinary shipped provider/device defaults stay.
-    const char *ffx_library = cfg_get("MKW_FFX_LIBRARY");
-    if (ffx_library && *ffx_library && has_ext(ep, ne, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME)) {
+    const char *ffx_library = cfg_get("MKW_FFX_FG_LIBRARY");
+    if (!ffx_library || !*ffx_library) ffx_library = cfg_get("MKW_FFX_LIBRARY");
+    const char *compute_derivatives = cfg_get("MKW_FFX_COMPUTE_DERIV");
+    if (ffx_library && *ffx_library && !(compute_derivatives && !strcmp(compute_derivatives,"0")) &&
+        has_ext(ep, ne, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME)) {
         has_compute_derivatives = 1;
         ext[n_ext++] = VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME;
         CHAIN(compute_derivatives, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR);
@@ -294,7 +297,7 @@ static int create_device(void) {
     OPTIONAL_EXT(has_provoking_vertex, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME, pv, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT);
     OPTIONAL_EXT(has_robustness2, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME, rob2, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT);
     OPTIONAL_EXT(has_device_fault, VK_EXT_DEVICE_FAULT_EXTENSION_NAME, fault, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT);
-    if (rt_knob("FG_NVOF", "0")) {
+    if (rt_knob("FG_NVOF", "1")) {
         OPTIONAL_EXT(has_oflow, VK_NV_OPTICAL_FLOW_EXTENSION_NAME, oflow, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV);
     }
     // Task and mesh programs; without it their draws are skipped.
