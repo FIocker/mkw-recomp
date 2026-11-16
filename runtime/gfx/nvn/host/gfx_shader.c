@@ -46,6 +46,7 @@ struct GfxShader {
     const struct GfxShader *variant_of;                    // gfx_shader_variant: the generic shader; NULL for one
     struct GfxShader *cs_variant;                          // task/mesh: the compute form (gfx_shader_cs_variant)
     int cs_of_mesh;                                        // this is the compute form of a task or mesh program
+    uint64_t spirv_fnv;                                    // gfx_shader_spirv_fnv, 0 until first asked for
 };
 
 static PlatMutex cache_lock = PLAT_MUTEX_INIT;                  // memory cache
@@ -616,6 +617,20 @@ const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words) {
     return s->spirv;
 }
 
+// FNV-1a 64 of the SPIR-V bytes, computed on the first call and kept on the shader: vk_temporal.c identifies the game's
+// SMAA and upscale programs by it on every draw. It was a 512-slot table keyed by pointer, and with the boot prewarm's
+// ~4700 shaders (or an unlucky heap layout) its collisions rehashed whole programs on the replay thread: +1 ms a frame
+// in the race (pf-fast/pf-slow sampled profiles, 16/11/2026). Concurrent first calls store the same value.
+uint64_t gfx_shader_spirv_fnv(const GfxShader *s) {
+    uint64_t h = __atomic_load_n(&s->spirv_fnv, __ATOMIC_RELAXED);
+    if (h) return h;
+    h = 0xcbf29ce484222325ull;
+    const uint8_t *b = (const uint8_t *)s->spirv;
+    for (uint64_t k = 0; b && k < s->words * 4; k++) h = (h ^ b[k]) * 0x100000001b3ull;
+    __atomic_store_n(&((GfxShader *)s)->spirv_fnv, h, __ATOMIC_RELAXED);
+    return h;
+}
+
 int gfx_shader_stage(const GfxShader *s) { return s->stage; }
 
 // A copy of s whose specialization constants default to val[k] for each word k with fix[k] (SCU<k> true, SCV<k> =
@@ -659,7 +674,7 @@ const GfxShader *gfx_shader_variant(const GfxShader *s, const uint32_t *val, con
     GfxShader *v = malloc(sizeof *v);
     if (!v) rt_fatal("gfx_shader: out of memory");
     *v = *s;
-    v->next = NULL, v->spirv = w, v->variant_of = s;
+    v->next = NULL, v->spirv = w, v->variant_of = s, v->spirv_fnv = 0;   // its own SPIR-V
     size_t n = 32 + (size_t)s->nspec * 5;
     uint8_t *buf = malloc(n);
     if (!buf) rt_fatal("gfx_shader: out of memory");

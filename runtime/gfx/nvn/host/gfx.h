@@ -62,6 +62,7 @@ const GfxShader *gfx_shader_load_input(const uint8_t iid[32]);
 // Boot prewarm of the pipeline key records' shaders into out[i]; off with prepared SPIR-V (all NULL, gfx_shader.c).
 void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **out);
 const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words);
+uint64_t gfx_shader_spirv_fnv(const GfxShader *s);          // FNV-1a 64 of the SPIR-V bytes, kept on the shader
 // Reflection: parsed once per shader from its .res.json and the SPIR-V before it enters the cache.
 enum { GFX_RES_UBO, GFX_RES_SSBO, GFX_RES_TEX, GFX_RES_IMG, GFX_RES_KINDS };
 typedef struct {

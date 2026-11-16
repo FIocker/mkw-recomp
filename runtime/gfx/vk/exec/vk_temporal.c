@@ -431,23 +431,12 @@ static struct {
     uint64_t log_frame;
 } T = {.jsign = {1, 1}, .cfg_seen = ~0u, .reset = 1};
 
+// The game's programs are known by the FNV-1a of their SPIR-V (the SHADER_* constants), of the generic shader for a
+// variant. Asked on every draw: gfx_shader_spirv_fnv keeps it on the shader.
 static uint64_t spv_hash(const GfxShader *s) {
-    static struct { const GfxShader *s; uint64_t h; } tab[512];
-    static PlatMutex lock = PLAT_MUTEX_INIT;
     if (!s) return 0;
     const GfxShader *g = gfx_shader_variant_of(s);
-    if (g) s = g;
-    uint32_t slot = (uint32_t)(((uintptr_t)s >> 4) * 2654435761u) % 512;
-    plat_mutex_lock(&lock);
-    if (tab[slot].s == s) { uint64_t h = tab[slot].h; plat_mutex_unlock(&lock); return h; }
-    plat_mutex_unlock(&lock);
-    uint64_t words = 0, h = 0xcbf29ce484222325ull;
-    const uint8_t *b = (const uint8_t *)gfx_shader_spirv(s, &words);
-    for (uint64_t k = 0; b && k < words * 4; k++) h = (h ^ b[k]) * 0x100000001b3ull;
-    plat_mutex_lock(&lock);
-    tab[slot].s = s, tab[slot].h = h;
-    plat_mutex_unlock(&lock);
-    return h;
+    return gfx_shader_spirv_fnv(g ? g : s);
 }
 
 static void read_cfg(void) {
