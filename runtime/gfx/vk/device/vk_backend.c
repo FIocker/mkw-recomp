@@ -105,11 +105,15 @@ static void flip_main(void *arg) {
         static int on_clock = -1;
         if (on_clock < 0) on_clock = !(cfg_get("MKW_FG_VBLANK") && !strcmp(cfg_get("MKW_FG_VBLANK"), "0"));
         uint64_t at = on_clock ? vk_present_flip_time(f.first > t0 ? f.first : t0) : 0;
+        // The first flip's wait is ready_slack's (it also measures MKW_LOW_LATENCY's slack), so the late test below is
+        // for the flips after it: after that wait `at` has always just passed, and tested there it moved every first
+        // made frame a refresh late (19 % of flips two refreshes apart, the game at 50 fps instead of 60 with 2x;
+        // merged-fsr-display75 against old89aa-current-display75 and ab-fg, 16/11/2026).
         frame_jit_slack(f.slot, ready_slack(at ? at : f.first, f.value));   // MKW_LOW_LATENCY (core/boot/frame_jit.c)
         for (int k = 1; k < f.nf; k++) {
             if (at) {
                 uint64_t now = kern_now_ns();
-                if (at < now) at = vk_present_flip_time(now);   // (late: the next refresh)
+                if (k > 1 && at < now) at = vk_present_flip_time(now);   // (late: the next refresh)
                 wait_until(at);
                 at = vk_present_flip_time(at + 1);   // the next vblank's
             } else {
