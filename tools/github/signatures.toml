@@ -10,6 +10,7 @@
 issue = 22
 wiki = "nvidia-device-fault-instruction-pointer-invalid"
 all = ["instruction pointer invalid"]
+fixed = "v0.1.12"
 what = "the GPU faults mid-draw on NVIDIA (\"device fault: instruction pointer invalid\")"
 
 [[signature]]

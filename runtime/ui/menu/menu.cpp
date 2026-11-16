@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "imgui.h"
+#include "ui/menu/id_check.h"
 #include "imgui_internal.h"   // SetFocusID, NavCursorVisible
 #include "backends/imgui_impl_vulkan.h"
 #include "ui/menu/binds_page.h"
@@ -175,6 +176,7 @@ static void make_context(void) {
     io.BackendPlatformName = "mkw_menu";
     menu_look_style(g_base_style);
     ImGui::GetStyle() = g_base_style;
+    ui_id_check_init();
     g_ctx_ok = 1;
 }
 
@@ -665,6 +667,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
         plat_mutex_unlock(&ev_lock);
     }
     ImGui_ImplVulkan_NewFrame();
+    ui_id_check("in-game menu");
     ImGui::NewFrame();
     if (open) layout_menu(t->width, t->height, scale);
     perf_draw(t, scale);

@@ -192,7 +192,7 @@ static void maybe_start(void) {
     CapMeta m = {CAP_MAGIC, CAP_VERSION, (uint32_t)nvn_depth_minus_w(), presents + 1, (uint64_t)want_frames,
                  L->heap.base, 0, L->alias.base, L->stack.base};
     cap_out(out, CAP_META, &m, sizeof m, NULL, 0);
-    if (!cap_mem_snapshot(out)) rt_fatal("cap: this platform cannot list populated guest pages (Linux only)");
+    if (!cap_mem_snapshot(out)) rt_fatal("cap: this platform cannot list populated guest pages");
     uint64_t mem = cap_out_bytes(out);
     write_state();
     int ngpu = 0;

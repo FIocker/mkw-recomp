@@ -39,6 +39,7 @@
 #include "backends/imgui_impl_sdl3.h"
 #include "backends/imgui_impl_sdlrenderer3.h"
 #include "imgui.h"
+#include "ui/menu/id_check.h"
 #include "imgui_internal.h"   // RenderTextEllipsis
 #include "ui/launcher/launcher.h"
 #include "ui/launcher/launcher_backdrop.h"
@@ -457,6 +458,7 @@ static void update_card(float w) {
     bool failed = u.phase == UPDATE_FAILED && u.tag[0];
     if (u.phase != UPDATE_OFFER && u.phase != UPDATE_FETCHING && !failed) return;
     char text[700];
+    ImGui::PushID("update");   // its Try again and the failed setup's share a page (files) and a label
     card_begin(w);
     if (failed) {
         snprintf(text, sizeof text, menu_text(UI_LAUNCH_UPDATE_FAILED), u.error);
@@ -481,6 +483,7 @@ static void update_card(float w) {
         ImGui::ProgressBar(u.total > 0 ? (float)u.done / (float)u.total : 0, ImVec2(w - 2 * card_pad(), 0), text);
     }
     card_end(failed ? LOOK_BAD : LOOK_ACCENT_HOT, with_alpha(failed ? LOOK_BAD : LOOK_ACCENT, 40));
+    ImGui::PopID();
 }
 
 // After the game is set up, once: the desktop shortcut offered on the main page until it is made or put off. The
@@ -1627,6 +1630,7 @@ extern "C" int launcher_run(void) {
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     launcher_look_style(L.base_style);
+    ui_id_check_init();
     opt_look(&launcher_look_rows);   // the settings rows in the start screen's palette, not the in-game menu's
     ImGui_ImplSDL3_InitForSDLRenderer(L.win, L.ren);
     ImGui_ImplSDLRenderer3_Init(L.ren);
@@ -1719,6 +1723,8 @@ extern "C" int launcher_run(void) {
         ImGui_ImplSDL3_NewFrame();
         io.DisplaySize = ImVec2((float)pw, (float)ph);   // pixels: the style and fonts follow the height
         io.DisplayFramebufferScale = ImVec2(1, 1);
+        static const char *const kPage[] = {"main", "settings", "files", "mods", "players", "tools"};
+        ui_id_check(kPage[L.page]);
         ImGui::NewFrame();
         // the intro's clock starts with the first frame of the main page, before its background: started in
         // page_main, frame 1 (the first one shown) would have the flag at full strength, gone the frame after

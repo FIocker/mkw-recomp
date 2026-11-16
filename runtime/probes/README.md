@@ -1,7 +1,7 @@
 # runtime/probes
 
 Self-tests of each subsystem, one command-line option each (`build/mkw --probe-…`). They come from totk-pc-recomp
-except `texpre_probe.c`, `fg_probe.c` and `fps_probe.c`.
+except `texpre_probe.c`, `fg_probe.c`, `fps_probe.c` and `discord_probe.c`.
 
 | File | Option | What it checks |
 |---|---|---|
@@ -9,6 +9,7 @@ except `texpre_probe.c`, `fg_probe.c` and `fps_probe.c`.
 | `audio_probe.c` | `--probe-audio` | MKW's own: the SDK's translated `nn::audio` client against the objects of `audren_sf.c`: parameter, open, 200 updates at 5 ms, device and close (formerly `--probe-ipc`) |
 | `cfg_probe.c` | `--probe-cfg` | Reading the `.ini`, environment variables and a missing file (`cfg.c`) |
 | `fg_probe.c` | `--probe-framegen` | MKW's own: frame generation's passes (`vk_framegen.c`) on two pictures in `MKW_FG_PROBE` (from `tools/imagen/fg_check.py`), the frame halfway and the vectors of each level written back, and its GPU time |
+| `discord_probe.c` | `--probe-discord` | MKW's own: Discord Rich Presence (`core/presence`) against the Discord running on this machine: connects, shows each phase a few seconds, clears it |
 | `fps_probe.c` | `--probe-fps` | MKW's own: `MKW_FPS=auto`'s controller (`fps_auto.c`) on synthetic frame times: the interval each steady frame time settles on with no changes after, a loading hitch, a return to 60 |
 | `oflow_probe.c` | `--probe-oflow` | Hardware optical flow on a known synthetic translation, vector sign/scale and timeline ordering (`MKW_FG_NVOF=1`), without game assets |
 | `fsr_fg_probe.c` | `--probe-fsr-fg` | Real FSR generation on an analytical moving plane, fixed object and shadow; compares geometry/image vectors (`MKW_FSR_PROBE_MV`) without assets or presentation. `MKW_FSR_PROBE_SIZE`/`FRAMES` select size and duration. Raw timing mode (`MKW_FSR_PROBE_INPUT_PREFIX`, suffixes in `FRAMES`) reads captured `vN.bin`/`zN.bin` instead; `MKW_FSR_PROBE_VECTOR=x,y` supplies a constant fractional control. Raw mode does not claim analytical quality |

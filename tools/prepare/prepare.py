@@ -182,14 +182,15 @@ COMPILER = [*GENERATOR, ROOT / "tools/build/build.py", Path(__file__).with_name(
 def warm(game: Path, work: Path, runtime: Path | None = None) -> None:
     """The game run once to its title, so the first real start finds pipeline-cache.bin and pipeline-keys.bin. Its
     saves go to a scratch profile: the player's first start stays a first start. The window opens without taking focus
-    and without sound; the run is ended after WARM_SECONDS."""
+    and without sound; the run is ended after WARM_SECONDS. Its log is logs/warm.log: in mkw.log it pushed the player's
+    last run out of the file reports attach and the start screen reads (#437, 16/11/2026)."""
     exe = (runtime or game) / ("mkw.exe" if os.name == "nt" else "mkw")
-    env = dict(os.environ, MKW_LAUNCHED="1", MKW_ASSUME_FOCUS="1", MKW_AUDIO="none",
+    env = dict(os.environ, MKW_LAUNCHED="1", MKW_ASSUME_FOCUS="1", MKW_AUDIO="none", MKW_LOG_NAME="warm",
                MKW_GAME_DIR=str(game), MKW_PROFILE_DIR=str(work / "warm-profile"))  # fmt: skip
     p = subprocess.Popen([str(exe)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for t in range(WARM_SECONDS):
         if p.poll() is not None:
-            raise Failed(f"the game stopped while warming up (exit {p.returncode}); its log is in {game / 'logs'}")
+            raise Failed(f"the game stopped while warming up (exit {p.returncode}); its log is {game / 'logs/warm.log'}")
         emit("progress", t, WARM_SECONDS)
         time.sleep(1)
     p.terminate()
