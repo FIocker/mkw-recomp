@@ -323,13 +323,14 @@ static void tab_graphics(float scale) {
         const char *names[3] = {menu_text(UI_MENU_PERF_OFF), "NVIDIA DLSS", "AMD FSR 3.1"};
         opt_choice_list("MKW_TEMPORAL", UI_MENU_TEMPORAL, vals, names, 3, UI_MENU_TEMPORAL_DESC);
         static const char *const qv[] = {"native", "quality", "balanced", "performance", "ultra"};
-        const char *qn[5] = {"Native (DLAA)", "Quality", "Balanced", "Performance", "Ultra performance"};
+        const char *qn[5] = {menu_text(UI_MENU_TQ_NATIVE), menu_text(UI_MENU_TQ_QUALITY), menu_text(UI_MENU_TQ_BALANCED),
+                              menu_text(UI_MENU_TQ_PERFORMANCE), menu_text(UI_MENU_TQ_ULTRA)};
         opt_choice_list("MKW_TEMPORAL_QUALITY", UI_MENU_TEMPORAL_QUALITY, qv, qn, 5, UI_MENU_TEMPORAL_QUALITY_DESC);
         static const char *const pv[] = {"default", "j", "k", "l", "m"};
-        const char *pn[5] = {"Default", "J", "K", "L", "M"};
+        const char *pn[5] = {menu_text(UI_MENU_DLSS_PRESET_DEFAULT), "J", "K", "L", "M"};
         opt_choice_list("MKW_DLSS_PRESET", UI_MENU_DLSS_PRESET, pv, pn, 5, UI_MENU_DLSS_PRESET_DESC);
         static const char *const cv[] = {"off", "on"};   // CAS on the upscaler's picture (vk_temporal.c), live
-        const char *cn[2] = {menu_text(UI_MENU_PERF_OFF), "On"};
+        const char *cn[2] = {menu_text(UI_MENU_PERF_OFF), menu_text(UI_MENU_ON)};
         opt_choice_list("MKW_CAS", UI_MENU_CAS, cv, cn, 2, UI_MENU_CAS_DESC);
         opt_slider("MKW_CAS_SHARPNESS", UI_MENU_CAS_SHARPNESS, 0, 100, UI_MENU_CAS_SHARPNESS_DESC, 5, "%.0f %%");
     }
@@ -354,7 +355,7 @@ static void tab_graphics(float scale) {
     }
     {   // NVIDIA Reflex (gfx/vk/device/vk_reflex_frame.c), live
         static const char *const vals[] = {"off", "on", "boost"};
-        const char *names[3] = {menu_text(UI_MENU_PERF_OFF), "On", "On + Boost"};
+        const char *names[3] = {menu_text(UI_MENU_PERF_OFF), menu_text(UI_MENU_ON), menu_text(UI_MENU_REFLEX_BOOST)};
         opt_choice_list("MKW_REFLEX", UI_MENU_REFLEX, vals, names, 3, UI_MENU_REFLEX_DESC);
     }
     opt_toggle("MKW_VRR", UI_MENU_VRR, UI_MENU_VRR_DESC);   // gfx/vk/device/vk_framegen.c fits, live

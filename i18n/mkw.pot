@@ -463,6 +463,10 @@ msgid ""
 "also keeps the GPU's clocks up. NVIDIA GPUs only."
 msgstr ""
 
+msgctxt "UI_MENU_REFLEX_BOOST"
+msgid "On + Boost"
+msgstr ""
+
 msgctxt "UI_MENU_TEMPORAL"
 msgid "AI upscaling"
 msgstr ""
@@ -483,12 +487,36 @@ msgid ""
 "58 %, Performance 50 %, Ultra performance 33 %. Applies at the next start."
 msgstr ""
 
+msgctxt "UI_MENU_TQ_NATIVE"
+msgid "Native (DLAA)"
+msgstr ""
+
+msgctxt "UI_MENU_TQ_QUALITY"
+msgid "Quality"
+msgstr ""
+
+msgctxt "UI_MENU_TQ_BALANCED"
+msgid "Balanced"
+msgstr ""
+
+msgctxt "UI_MENU_TQ_PERFORMANCE"
+msgid "Performance"
+msgstr ""
+
+msgctxt "UI_MENU_TQ_ULTRA"
+msgid "Ultra performance"
+msgstr ""
+
 msgctxt "UI_MENU_DLSS_PRESET"
 msgid "DLSS model"
 msgstr ""
 
 msgctxt "UI_MENU_DLSS_PRESET_DESC"
 msgid "NVIDIA's model DLSS uses: the default of the DLSS version next to the game, or presets J, K, L, M."
+msgstr ""
+
+msgctxt "UI_MENU_DLSS_PRESET_DEFAULT"
+msgid "Default"
 msgstr ""
 
 msgctxt "UI_MENU_CAS"
