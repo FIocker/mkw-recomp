@@ -942,12 +942,13 @@ int vk_fg_uneven(void) {
     return !fits(atoi(v));
 }
 
-// MKW_FG_DUMP=<game frame> (checking, with MKW_FG_DUMP_DIR, default "."): from that game frame of frame generation on,
+// MKW_FG_DUMP=<counter> (checking, with MKW_FG_DUMP_DIR, default "."): from that generation counter onward,
 // four in a row as g<n>.png and the first frame made before each as m<n>.png, read back on the present thread (it
 // waits for the GPU then): tools/imagen/fg_check.py takes three g in a row (the made frame between the first and the
 // third against the second). MKW_FG_COMPARE_NATIVE=1 in an SDR FSR run also writes r<n>.png, the diagnostic native
 // synthesis at t=0.5 from the same two source pictures; it is never presented. MKW_SHOTS reads the game's pictures,
-// black on some machines; these are what is shown.
+// black on some machines; these are what is shown. The counter can include pre-race pictures: the capture log gives
+// its source game frame, reset and hardware-flow state. The host readback pages are touched 120 frames beforehand.
 uint64_t vk_fg_game_frame;   // the game frame vk_fg_frame is called for (vk_backend.c present_main)
 VkFormat vk_fg_src_format = VK_FORMAT_R8G8B8A8_UNORM;   // that frame's picture format (vk_backend.c)
 VkFormat vk_fg_out_format = VK_FORMAT_R8G8B8A8_UNORM;   // the format of the frames vk_fg_frame handed out
@@ -969,7 +970,7 @@ static struct {
     int raw[DUMP_N];
     int nv[DUMP_N];
     uint32_t grid[DUMP_N][3];
-    VkFormat fmt;   // exact presented encoding, including packed HDR10 readback
+    VkFormat fmt[DUMP_N];   // each frame's exact encoding, including a bypass or HDR transition
 } D;
 
 static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int h, VkImage native_ref) {
@@ -980,9 +981,9 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
     const char *raw_env = cfg_get("MKW_FG_DUMP_INPUTS");
     int raw_inputs = raw_env && strcmp(raw_env,"0");
     VkDeviceSize part = (VkDeviceSize)w * h * (raw_inputs ? 28 : 20) + 64;
-    if (F.frames < D.at || F.frames >= D.at + DUMP_N || (D.buf && (D.w != w || D.h != h))) return 0;
+    uint64_t warm_at = D.at > 120 ? D.at - 120 : 0;
+    if (F.frames < warm_at || F.frames >= D.at + DUMP_N || (D.buf && (D.w != w || D.h != h))) return 0;
     if (vk_fg_out_format != VK_FORMAT_R8G8B8A8_UNORM && vk_fg_out_format != VK_FORMAT_A2B10G10R10_UNORM_PACK32) return 0;
-    D.fmt = vk_fg_out_format;
     VkCtx *c = vk_ctx();
     if (!D.buf) {
         D.size = part * DUMP_N, D.stride = part, D.w = w, D.h = h;
@@ -993,8 +994,16 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
         VmaAllocationInfo info;
         if (vmaCreateBuffer(c->vma, &bi, &ai, &D.buf, &D.alloc, &info) != VK_SUCCESS) return D.at = UINT64_MAX, 0;
         D.map = info.pMappedData;
+        // A 4K batch maps over 500 MiB. Fault its host pages before the requested sequence, so allocation does not
+        // reset temporal history between the captured frames. This path exists only with MKW_FG_DUMP enabled.
+        memset(D.map, 0, (size_t)D.size);
+        vmaFlushAllocation(c->vma, D.alloc, 0, VK_WHOLE_SIZE);
+        rt_log("fg capture: readback prewarmed at counter %llu for %llu", (unsigned long long)F.frames,
+               (unsigned long long)D.at);
     }
+    if (F.frames < D.at) return 0;
     int k = (int)(F.frames - D.at);
+    D.fmt[k] = vk_fg_out_format;
     VkDeviceSize base = part * (VkDeviceSize)k;
     D.n[k] = n;
     D.hl[k] = F.hl_last && F.hl_dump;
@@ -1024,6 +1033,9 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
         }
         vkCmdCopyImageToBuffer(cb, in.depth, VK_IMAGE_LAYOUT_GENERAL, D.buf, 9, samples);
     }
+    rt_log("fg capture: counter %llu source frame %llu generated %d reset %d hardware %d format %d",
+           (unsigned long long)F.frames, (unsigned long long)vk_fg_game_frame, n - 1,
+           D.depth[k] ? D.inputs[k].reset : -1, F.of_active, (int)D.fmt[k]);
     VkDeviceSize nv_bytes = (VkDeviceSize)F.of_result.wblocks * F.of_result.hblocks * 4;
     D.nv[k] = F.of_active && nv_bytes <= (VkDeviceSize)w * h * 4;
     if (D.nv[k]) {
@@ -1061,7 +1073,7 @@ static void dump_write(VkFence fence) {
         for (int k = 0; k < 4; k++) {
             if (!D.n[f] || (k == 1 && D.n[f] < 2) || (k == 2 && !D.hl[f]) || (k == 3 && !D.ref[f])) continue;
             snprintf(path, sizeof path, "%s/%c%llu.png", dir, "gmhr"[k], (unsigned long long)(D.at + (uint64_t)f));
-            if (D.fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {   // 10 bits a channel to 8, in place
+            if (D.fmt[f] == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {   // 10 bits a channel to 8, in place
                 uint32_t *q = (uint32_t *)((uint8_t *)D.map + (size_t)D.stride * f + px * (size_t)k);
                 for (size_t i = 0; i < (size_t)D.w * D.h; i++) {
                     uint32_t v = q[i];
