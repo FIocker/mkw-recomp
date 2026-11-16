@@ -7,8 +7,8 @@
 //     replay turns that into Vulkan work as it comes);
 //   replay thread, once the frame's last submission is recorded (vk_backend.c present_image): RENDERSUBMIT_END;
 //   present thread, around the vkQueuePresentKHR of the game's frame: PRESENT_START and PRESENT_END, with the frame's
-//     id as its VkPresentIdKHR. Frames made by frame generation get no id and no markers: they belong to the game frame
-//     they are shown with.
+//     id as its VkPresentIdKHR. Frames made by frame generation have no own VkPresentIdKHR and use out-of-band present
+//     markers with the game frame's id, so they belong to that application frame.
 // The swapchain is made with low-latency mode allowed whenever the device has the extension, so the setting changes
 // without a new swapchain.
 #include <string.h>
@@ -130,6 +130,16 @@ uint64_t vk_rfx_present_start(uint64_t id) {
 
 void vk_rfx_present_end(uint64_t id) {
     if (on() && id) vk_reflex_marker(L.r, L.sc, VK_LATENCY_MARKER_PRESENT_END_NV, id);
+}
+
+uint64_t vk_rfx_oob_present_start(uint64_t id) {
+    if (!on() || !id) return 0;
+    vk_reflex_marker(L.r, L.sc, VK_LATENCY_MARKER_OUT_OF_BAND_PRESENT_START_NV, id);
+    return id;
+}
+
+void vk_rfx_oob_present_end(uint64_t id) {
+    if (on() && id) vk_reflex_marker(L.r, L.sc, VK_LATENCY_MARKER_OUT_OF_BAND_PRESENT_END_NV, id);
 }
 
 void vk_rfx_shutdown(void) {

@@ -136,8 +136,8 @@ VkReflex *vk_reflex_create(VkDevice device, uint32_t enabled_spec_version) {
         free(reflex);
         return NULL;
     }
-    rt_log("vk: Reflex enabled through VK_NV_low_latency2 revision %u; explicit submission IDs %s",
-           enabled_spec_version, enabled_spec_version >= 3 ? "on" : "off (revision below 3)");
+    rt_log("vk: Reflex enabled through VK_NV_low_latency2 revision %u; explicit submission attribution %s",
+           enabled_spec_version, enabled_spec_version >= 3 ? "available" : "unavailable (revision below 3)");
     return reflex;
 }
 

@@ -119,7 +119,10 @@ static void flip_main(void *arg) {
             } else {
                 wait_until(f.first + (uint64_t)(k - 1) * f.step);
             }
-            vk_lat_flip(f.slot, k == 1, 0, vk_present_flip());   // MKW_LATENCY: the first made frame
+            uint64_t rfx = vk_rfx_oob_present_start(f.frame);
+            uint64_t id = vk_present_flip();
+            vk_rfx_oob_present_end(rfx);
+            vk_lat_flip(f.slot, k == 1, 0, id);   // MKW_LATENCY: a made frame
             plat_mutex_lock(&fl_m);
             fl_images--;
             plat_cond_broadcast(&fl_cv);
@@ -224,7 +227,10 @@ static void present_main(void *arg) {
         frame_jit_slack(j.at, ready_slack(nf ? first : j.at, f));   // MKW_LOW_LATENCY (core/boot/frame_jit.c)
         for (int k = 1; k < nf; k++) {
             wait_until(first + (uint64_t)(k - 1) * step);
-            vk_lat_flip(j.at, k == 1, 0, vk_present_flip());   // MKW_LATENCY: the first made frame
+            uint64_t rfx = vk_rfx_oob_present_start(j.frame);
+            uint64_t id = vk_present_flip();
+            vk_rfx_oob_present_end(rfx);
+            vk_lat_flip(j.at, k == 1, 0, id);   // MKW_LATENCY: a made frame
         }
         uint64_t target = nf ? first + (uint64_t)(nf - 1) * step : j.at;
         // the game's frame alone: half a refresh before a vblank on the vblank clock (gfx_present.c), so with the tick
