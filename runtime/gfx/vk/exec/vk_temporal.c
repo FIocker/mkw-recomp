@@ -1034,6 +1034,17 @@ int vk_tmp_fg_hudless(uint64_t frame, VkTmpPic *out) {
     return 1;
 }
 
+// A game frame with the upscaler on and no picture without the HUD: no pass of it sampled the upscaler's picture, so
+// it is a menu or another full-screen 2D layer (the pause menu, the course vote after a race, the title's menus).
+// Frame generation would interpolate the menu itself: its buttons change colour and its cursor jumps between two game
+// frames with no motion to follow, and the made frames tore them into blocks and smeared them (pause6, 16/11/2026: the
+// "Resume" button in red and white rectangles between two clean game frames; the player: "flash/flicker like crazy").
+// Only once a picture without the HUD has been made (HL.out): an upscaler that never ran (it failed every frame:
+// ui1, DLSS native at 3840x1820 HDR, bad00005) made none, and every frame would have counted as a menu.
+int vk_tmp_fg_ui_frame(uint64_t frame) {
+    return vk_tmp_engine() != VK_TMP_OFF && hl_wanted() && HL.out && HL.out_frame != frame;
+}
+
 static int retarget_wanted(uint32_t sw, uint32_t sh) {
     static int on = -1;
     if (on < 0) on = cfg_get("MKW_TEMPORAL_RETARGET") ? strcmp(cfg_get("MKW_TEMPORAL_RETARGET"), "0") != 0 : 1;
@@ -1116,6 +1127,12 @@ static int dlss_feature(VkCommandBuffer cb, uint32_t w, uint32_t h, uint32_t ow,
     if (mh < h) mh = h;
     if (mw > ow) mw = ow;
     if (mh > oh) mh = oh;
+    // The setting's share is of the game's screen lines, not of the output: with the output retargeted past the
+    // screen (3840x1820 from a 1440-line screen) "native" gave a 3840x1820 feature, DLAA, whose dynamic range is
+    // within ~1% of the output (NGX: "RenderSubrect (2560x1440) outside of Min (3802x1802) and Max (3840x1820)"), and
+    // every evaluation of the 2560x1440 frames failed (bad00005; ui2, 16/11/2026): no upscale, no picture without the
+    // HUD for frame generation. A frame under DLAA's band gets a feature of its own size and mode.
+    if (perf_quality(mw, ow) == 5 && perf_quality(w, ow) != 5) mw = w, mh = h;
     ftick++;
     for (int i = 0; i < FEATS; i++) {
         Feat *e = &FC[i];

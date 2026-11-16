@@ -67,6 +67,7 @@ int vk_tmp_hl_redo(void);
 int vk_tmp_hl_redo_begin(VkExec *ex);
 void vk_tmp_hl_redo_end(VkExec *ex);
 int vk_tmp_fg_hudless(uint64_t frame, VkTmpPic *out);
+int vk_tmp_fg_ui_frame(uint64_t frame);   // the upscaler on, and this game frame has no picture without the HUD: a menu
 // DLSS Frame Generation (NGX) for vk_framegen.c: count frames between the last call's picture and bb into out[]; returns
 // how many it made, 0 when it cannot (the caller falls back to its own). vk_tmp_ngx_fg_max: the most this GPU makes.
 // hl: the picture without the HUD at bb's size and format (NULL: none).

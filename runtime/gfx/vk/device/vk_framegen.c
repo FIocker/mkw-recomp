@@ -114,6 +114,8 @@ static struct {
     // pacing (the present thread)
     uint64_t last_at, interval, frames, made_total;
     int logged_mult, auto_m;   // auto_m: MKW_FRAMEGEN=auto's factor now (mult_now)
+    int ui_paused, ui_logged;  // vk_fg_frame: a menu frame shown as it is (vk_tmp_fg_ui_frame), the lines logged
+    uint64_t ui_frames;
     // the GPU time of each slot's command buffer (two timestamps), read when the slot comes round again: the made
     // frames are flipped on the CPU's schedule, so a generation longer than a step shows them late
     VkQueryPool qp;
@@ -1213,6 +1215,22 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
         F.have_prev = 0;
         return 0;
     }
+    // A menu over the upscaled scene (vk_temporal.c vk_tmp_fg_ui_frame): its picture shown for every refresh of the
+    // game frame, as a movie's. The next frame with a picture without the HUD starts over (have_prev 0; DLSS-G resets
+    // on the skipped frame numbers).
+    if (vk_tmp_fg_ui_frame(vk_fg_game_frame)) {
+        bypass_order();
+        if (!F.ui_paused && F.ui_logged < 20)
+            F.ui_logged++, rt_log("vk: frame generation paused at game frame %llu (a menu: no picture without the HUD)",
+                                  (unsigned long long)vk_fg_game_frame);
+        F.ui_paused = 1, F.ui_frames++;
+        F.have_prev = 0;
+        return 0;
+    }
+    if (F.ui_paused && F.ui_logged <= 20)
+        rt_log("vk: frame generation back at game frame %llu (%llu menu frames shown as they are)",
+               (unsigned long long)vk_fg_game_frame, (unsigned long long)F.ui_frames);
+    F.ui_paused = 0;
     VkCtx *c = vk_ctx();
     if (!F.tried) init(c);
     if (!F.ok) return 0;
