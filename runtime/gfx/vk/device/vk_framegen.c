@@ -949,6 +949,7 @@ int vk_fg_uneven(void) {
 // synthesis at t=0.5 from the same two source pictures; it is never presented. MKW_SHOTS reads the game's pictures,
 // black on some machines; these are what is shown. The counter can include pre-race pictures: the capture log gives
 // its source game frame, reset and hardware-flow state. The host readback pages are touched 120 frames beforehand.
+// MKW_FG_DUMP_AFTER=<seconds> instead uses MKW_SEQ_UNTIL's watched event, with a two-second readback warmup.
 uint64_t vk_fg_game_frame;   // the game frame vk_fg_frame is called for (vk_backend.c present_main)
 VkFormat vk_fg_src_format = VK_FORMAT_R8G8B8A8_UNORM;   // that frame's picture format (vk_backend.c)
 VkFormat vk_fg_out_format = VK_FORMAT_R8G8B8A8_UNORM;   // the format of the frames vk_fg_frame handed out
@@ -959,6 +960,8 @@ VkFormat vk_fg_out_format = VK_FORMAT_R8G8B8A8_UNORM;   // the format of the fra
 #define DUMP_N 4
 static struct {
     uint64_t at;
+    int initialized;
+    int64_t after_us, prewarmed_us;
     VkBuffer buf;
     VmaAllocation alloc;
     void *map;
@@ -974,15 +977,26 @@ static struct {
 } D;
 
 static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int h, VkImage native_ref) {
-    if (!D.at) {
+    if (!D.initialized) {
+        D.initialized = 1;
         const char *e = cfg_get("MKW_FG_DUMP");
         D.at = e && atoll(e) > 0 ? (uint64_t)atoll(e) : UINT64_MAX;
+        const char *after = cfg_get("MKW_FG_DUMP_AFTER");
+        char *end;
+        double seconds = after ? strtod(after, &end) : 0;
+        if (after && end != after && !*end && seconds >= .001 && seconds <= 3600) {
+            D.after_us = (int64_t)(seconds * 1000000.0);
+            D.at = UINT64_MAX;
+        }
     }
     const char *raw_env = cfg_get("MKW_FG_DUMP_INPUTS");
     int raw_inputs = raw_env && strcmp(raw_env,"0");
     VkDeviceSize part = (VkDeviceSize)w * h * (raw_inputs ? 28 : 20) + 64;
-    uint64_t warm_at = D.at > 120 ? D.at - 120 : 0;
-    if (F.frames < warm_at || F.frames >= D.at + DUMP_N || (D.buf && (D.w != w || D.h != h))) return 0;
+    int awaiting_after = D.after_us && D.at == UINT64_MAX;
+    if (awaiting_after && seqwatch_since_us() < D.after_us - 2000000) return 0;
+    uint64_t warm_at = awaiting_after ? F.frames : D.at > 120 ? D.at - 120 : 0;
+    if (F.frames < warm_at || (!awaiting_after && F.frames >= D.at + DUMP_N) ||
+        (D.buf && (D.w != w || D.h != h))) return 0;
     if (vk_fg_out_format != VK_FORMAT_R8G8B8A8_UNORM && vk_fg_out_format != VK_FORMAT_A2B10G10R10_UNORM_PACK32) return 0;
     VkCtx *c = vk_ctx();
     if (!D.buf) {
@@ -992,14 +1006,25 @@ static int dump_record(VkCommandBuffer cb, const VkImage *out, int n, int w, int
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
         VmaAllocationInfo info;
-        if (vmaCreateBuffer(c->vma, &bi, &ai, &D.buf, &D.alloc, &info) != VK_SUCCESS) return D.at = UINT64_MAX, 0;
+        if (vmaCreateBuffer(c->vma, &bi, &ai, &D.buf, &D.alloc, &info) != VK_SUCCESS) {
+            D.after_us = 0;
+            return D.at = UINT64_MAX, 0;
+        }
         D.map = info.pMappedData;
         // A 4K batch maps over 500 MiB. Fault its host pages before the requested sequence, so allocation does not
         // reset temporal history between the captured frames. This path exists only with MKW_FG_DUMP enabled.
         memset(D.map, 0, (size_t)D.size);
         vmaFlushAllocation(c->vma, D.alloc, 0, VK_WHOLE_SIZE);
+        D.prewarmed_us = seqwatch_since_us();
         rt_log("fg capture: readback prewarmed at counter %llu for %llu", (unsigned long long)F.frames,
                (unsigned long long)D.at);
+    }
+    if (awaiting_after) {
+        int64_t since = seqwatch_since_us();
+        if (since < D.after_us || since - D.prewarmed_us < 2000000 || n <= 1) return 0;
+        D.at = F.frames;
+        rt_log("fg capture: armed %.3f seconds after watched phase, counter %llu source frame %llu",
+               since / 1000000.0, (unsigned long long)D.at, (unsigned long long)vk_fg_game_frame);
     }
     if (F.frames < D.at) return 0;
     int k = (int)(F.frames - D.at);
