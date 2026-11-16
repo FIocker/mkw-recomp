@@ -10,7 +10,7 @@ except `texpre_probe.c` and `fg_probe.c`.
 | `cfg_probe.c` | `--probe-cfg` | Reading the `.ini`, environment variables and a missing file (`cfg.c`) |
 | `fg_probe.c` | `--probe-framegen` | MKW's own: frame generation's passes (`vk_framegen.c`) on two pictures in `MKW_FG_PROBE` (from `tools/imagen/fg_check.py`), the frame halfway and the vectors of each level written back, and its GPU time |
 | `oflow_probe.c` | `--probe-oflow` | Hardware optical flow on a known synthetic translation, vector sign/scale and timeline ordering (`MKW_FG_NVOF=1`), without game assets |
-| `fsr_fg_probe.c` | `--probe-fsr-fg` | Real FSR generation on an analytical moving plane, fixed object and shadow; compares geometry/image vectors (`MKW_FSR_PROBE_MV`) without assets or presentation |
+| `fsr_fg_probe.c` | `--probe-fsr-fg` | Real FSR generation on an analytical moving plane, fixed object and shadow; compares geometry/image vectors (`MKW_FSR_PROBE_MV`) without assets or presentation. `MKW_FSR_PROBE_SIZE`/`FRAMES` select size and duration. Raw timing mode (`MKW_FSR_PROBE_INPUT_PREFIX`, suffixes in `FRAMES`) reads captured `vN.bin`/`zN.bin` instead; `MKW_FSR_PROBE_VECTOR=x,y` supplies a constant fractional control. Raw mode does not claim analytical quality |
 | `gfx_abi_probe.c` | `--probe-gfx-abi` | Our objects fit in NVN's and the fields the game reads are where it expects them |
 | `gfx_window_probe.c` | `--probe-window` | Window present, vsync, focus, cursor and resize |
 | `kernel_probe.c` | `--probe-kernel` | Waits, wakeups, virtual cores and their arguments (cores 0-5), fibers (also one moved between threads) and translated code on four threads |
