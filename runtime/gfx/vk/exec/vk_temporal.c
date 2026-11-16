@@ -4,7 +4,7 @@
 // Where it runs (measured with MKW_DUMP in races, 15/11/2026). MKW renders its 3D scene and its screen (HUD, menus) at
 // two resolutions of its own, from GamePerformanceGraphicsConfigGParam (romfs_res.c): with the 3D lines below the
 // screen's, the frame is the scene into an R11G11B10F light target with a D32FS8 depth, bloom, the tonemap pass, SMAA
-// (agl's three passes: edges, weights, blend, fs a1becfadc5da81ad / 68b69c76ad2d7905 / 138f5b8eb8a6b9e0), then one
+// (agl's three passes: edges, weights, blend, fs 9e672c00f0cd8eb1 / 68b69c76ad2d7905 / 138f5b8eb8a6b9e0), then one
 // compute dispatch (cs 5d920a71d444c084: tex slot 0 the anti-aliased scene, img slot 1 the screen-size target) scales
 // the scene into the screen target, and the HUD is drawn over it. With the 3D lines equal to the screen's there is no
 // dispatch: the SMAA blend writes the screen target itself. The upscaler takes the place of that dispatch, or of the
@@ -433,7 +433,7 @@ static void ngx_init(void) {
 #define CAM_BYTES 0x980u   // the scene camera block's size (vertex c4)
 #define CAM_ROWS 32
 #define SHADER_SMAA_BLEND 0x138f5b8eb8a6b9e0ull
-#define SHADER_SMAA_EDGE 0xa1becfadc5da81adull
+#define SHADER_SMAA_EDGE 0x9e672c00f0cd8eb1ull   // 1.0.0, the translator of main bd367ee (was a1becfadc5da81ad; only traced)
 #define SHADER_SMAA_WEIGHT 0x68b69c76ad2d7905ull
 
 typedef struct {
@@ -477,6 +477,7 @@ static struct {
     double last_vp[16];
     int last_vp_ok;
     int reset;                   // the next evaluation starts a new history
+    uint64_t use_fence;          // the last replay submission that used the upscaler's images (release_images)
     uint64_t last_eval_ns;
     // stats, logged every 600 frames
     uint64_t evals, cams_miss, prev_match, prev_differ, fails, plain;
@@ -717,14 +718,38 @@ static struct {
 } R = {.ok = -1};
 
 #define FG_SLOTS 3
-static struct {                  // what each evaluation leaves for frame generation (vk_tmp_fg_inputs)
+// What each evaluation leaves for frame generation (vk_tmp_fg_inputs), written by the replay and read by the present
+// thread: seq is odd while the replay rewrites the slot (every FG_SLOTS frames), so a reader takes a whole slot of one
+// frame or none (PR 462 review: read without a lock), and the slot names its own images (retired through
+// vk_fg_retire, never freed under a reader)
+typedef struct {
+    unsigned seq;
+    VkImage mv, z;
+    VkImageView mvv, zv;
     uint64_t frame;
     uint32_t w, h;
     float jx, jy, znear, zfar, fov, aspect, frame_ms;
     int reset;
     float cam[CAM_ROWS * 4];
     double m[16];                // this frame's clip space to the last's
-} FS[FG_SLOTS];
+} FgSlot;
+static FgSlot FS[FG_SLOTS];
+
+static void fs_begin(FgSlot *f) {   // the replay
+    __atomic_store_n(&f->seq, f->seq + 1, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+}
+static void fs_end(FgSlot *f) { __atomic_store_n(&f->seq, f->seq + 1, __ATOMIC_RELEASE); }
+static int fs_read(const FgSlot *f, FgSlot *out) {   // the present thread: 1 with a whole slot
+    for (int t = 0; t < 4; t++) {
+        unsigned q = __atomic_load_n(&f->seq, __ATOMIC_ACQUIRE);
+        if (q & 1) continue;
+        memcpy(out, (const void *)f, sizeof *out);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&f->seq, __ATOMIC_RELAXED) == q) return 1;
+    }
+    return 0;
+}
 
 // The replay may not wait for the GPU: a submission already queued can wait on a timeline value that only the one
 // being recorded signals (a vkDeviceWaitIdle here hung a run). What the GPU may still use goes once the submission
@@ -745,16 +770,29 @@ void vk_tmp_defer(void (*fn)(void *), void *arg) {
     else fn(arg);   // (outside a recording: nothing of this run uses it)
 }
 
-static int own_image(Own *o, uint32_t w, uint32_t h, VkFormat f) {
+// An image going: once the replay's submission at fence is done (0: at once), and for an image frame generation reads
+// on the present thread (fg: the motion vectors, depth and picture without the HUD) also once no generation can read
+// it (vk_framegen.c vk_fg_retire), from this game frame on
+typedef struct { OwnGone g; uint64_t frame; } OwnFg;   // g first: own_free frees the whole
+static void own_fg(void *arg) { OwnFg *x = arg; vk_fg_retire(x->frame, own_free, x); }   // completion thread
+static void gone_retire(VkImage img, VmaAllocation mem, VkImageView view, uint64_t fence, int fg) {
+    OwnFg *x = malloc(sizeof *x);
+    if (!x) rt_fatal("temporal: out of memory");
+    x->g = (OwnGone){img, mem, view}, x->frame = T.frame;
+    if (fence) vk_completion_add(fence, fg ? own_fg : own_free, x);
+    else if (fg) own_fg(x);
+    else own_free(x);
+}
+static void own_retire(Own *o, uint64_t fence, int fg) {
+    if (o->img) gone_retire(o->img, o->mem, o->view, fence, fg);
+    *o = (Own){0};
+}
+
+#define own_image(o, w, h, f) own_image_x(o, w, h, f, 0)   // an image only the replay uses
+static int own_image_x(Own *o, uint32_t w, uint32_t h, VkFormat f, int fg) {
     if (o->img && o->w == w && o->h == h && o->fmt == f) return 1;
     const VkCtx *c = vk_ctx();
-    if (o->img) {   // a size change (the game's dynamic resolution, a mode change)
-        OwnGone *g = malloc(sizeof *g);
-        if (!g) rt_fatal("temporal: out of memory");
-        *g = (OwnGone){o->img, o->mem, o->view};
-        vk_tmp_defer(own_free, g);
-        *o = (Own){0};
-    }
+    if (o->img) own_retire(o, tmp_fence, fg);   // a size change (the game's dynamic resolution, a mode change)
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = f,
                             .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
                             .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -874,6 +912,8 @@ void vk_tmp_present_size(uint32_t w, uint32_t h) { RT.ow = w, RT.oh = h; }
 int vk_tmp_target(VkExecTarget *t) {
     if (!RT.on || !t->image || t->image != RT.src) return 0;
     t->image = R.big.img;
+    uint64_t uf = vk_exec_recording_fence();
+    if (uf > T.use_fence) T.use_fence = uf;
     t->img = NULL;   // view_of makes the view for the command buffer
     t->width = R.big.w, t->height = R.big.h;
     t->level = 0, t->base_layer = 0, t->layers = 1;
@@ -909,10 +949,34 @@ static struct {
     int told;
 } HL;
 static _Thread_local int hl_saw, hl_redo;
+// HL.out as the present thread may read it (vk_tmp_fg_hudless, vk_tmp_fg_ui_frame): the replay publishes each finished
+// picture under a sequence count (odd while it writes), as FS[] (PR 462 review: HL.out read without a lock)
+static struct { unsigned seq; VkImage img; VkFormat fmt; uint32_t w, h; uint64_t frame; } HLP;
+static void hlp_publish(VkImage img, VkFormat fmt, uint32_t w, uint32_t h, uint64_t frame) {   // the replay
+    __atomic_store_n(&HLP.seq, HLP.seq + 1, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    HLP.img = img, HLP.fmt = fmt, HLP.w = w, HLP.h = h, HLP.frame = frame;
+    __atomic_store_n(&HLP.seq, HLP.seq + 1, __ATOMIC_RELEASE);
+}
+static int hlp_read(VkImage *img, VkFormat *fmt, uint32_t *w, uint32_t *h, uint64_t *frame) {
+    for (int t = 0; t < 4; t++) {
+        unsigned q = __atomic_load_n(&HLP.seq, __ATOMIC_ACQUIRE);
+        if (q & 1) continue;
+        *img = HLP.img, *fmt = HLP.fmt, *w = HLP.w, *h = HLP.h, *frame = HLP.frame;
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&HLP.seq, __ATOMIC_RELAXED) == q) return 1;
+    }
+    return 0;
+}
 
 void vk_tmp_sampled(VkImage *image, VkImageView *view) {
+    VkImage was = *image;
     if (RT.on && *image == RT.src && R.big.view) *image = R.big.img, *view = R.big.view;
     if (hl_redo && HL.dst && *image == HL.dst && HL.snap.view) *image = HL.snap.img, *view = HL.snap.view;
+    if (*image != was) {
+        uint64_t uf = vk_exec_recording_fence();
+        if (uf > T.use_fence) T.use_fence = uf;
+    }
 }
 
 // The texture descriptor memo (vk_exec_bind.c tex_info) keys on the slot, not on this frame's substitution: kept for
@@ -943,13 +1007,6 @@ static int hl_wanted(void) {
     return vk_fg_wanted() && RT_KNOB_ON(mode);
 }
 
-static void hl_out_free(void *arg) {   // completion thread
-    OwnGone *g = arg;
-    const VkCtx *c = vk_ctx();
-    if (c) vmaDestroyImage(c->vma, g->img, g->mem);
-    free(g);
-}
-
 int vk_tmp_hl_redo_begin(VkExec *ex) {
     int saw = hl_saw;
     hl_saw = 0;
@@ -971,11 +1028,8 @@ int vk_tmp_hl_redo_begin(VkExec *ex) {
     VkFormat imf = t->img ? t->img->format : t->format;
     const VkCtx *c = vk_ctx();
     if (!HL.out || HL.out_w != t->width || HL.out_h != t->height || HL.out_fmt != imf) {
-        if (HL.out) {
-            OwnGone *g = malloc(sizeof *g);
-            if (!g) rt_fatal("temporal: out of memory");
-            *g = (OwnGone){HL.out, HL.out_mem, VK_NULL_HANDLE};
-            vk_completion_add(ex->fence, hl_out_free, g);
+        if (HL.out) {   // the present thread may still read the last one (HLP): through vk_fg_retire
+            gone_retire(HL.out, HL.out_mem, VK_NULL_HANDLE, ex->fence, 1);
             HL.out = VK_NULL_HANDLE;
         }
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = imf,
@@ -1024,13 +1078,18 @@ void vk_tmp_hl_redo_end(VkExec *ex) {
     vk_exec_draw_forget();
     ex->dirty = VK_EXEC_DIRTY_ALL;
     HL.out_frame = T.frame;
+    hlp_publish(HL.out, HL.out_fmt, HL.out_w, HL.out_h, T.frame);
     if (HL.redos++ % 1800 == 0)
         rt_log("temporal: the last pass recorded again without the HUD (%llu frames)", (unsigned long long)HL.redos);
 }
 
-int vk_tmp_fg_hudless(uint64_t frame, VkTmpPic *out) {
-    if (!frame || HL.out_frame != frame || !HL.out) return 0;
-    *out = (VkTmpPic){HL.out, VK_NULL_HANDLE, HL.out_fmt, HL.out_w, HL.out_h};
+int vk_tmp_fg_hudless(uint64_t frame, VkTmpPic *out) {   // the present thread
+    VkImage img;
+    VkFormat fmt;
+    uint32_t w, h;
+    uint64_t f;
+    if (!frame || !hlp_read(&img, &fmt, &w, &h, &f) || f != frame || !img) return 0;
+    *out = (VkTmpPic){img, VK_NULL_HANDLE, fmt, w, h};
     return 1;
 }
 
@@ -1041,8 +1100,13 @@ int vk_tmp_fg_hudless(uint64_t frame, VkTmpPic *out) {
 // "Resume" button in red and white rectangles between two clean game frames; the player: "flash/flicker like crazy").
 // Only once a picture without the HUD has been made (HL.out): an upscaler that never ran (it failed every frame:
 // ui1, DLSS native at 3840x1820 HDR, bad00005) made none, and every frame would have counted as a menu.
-int vk_tmp_fg_ui_frame(uint64_t frame) {
-    return vk_tmp_engine() != VK_TMP_OFF && hl_wanted() && HL.out && HL.out_frame != frame;
+int vk_tmp_fg_ui_frame(uint64_t frame) {   // the present thread
+    VkImage img;
+    VkFormat fmt;
+    uint32_t w, h;
+    uint64_t f;
+    if (vk_tmp_engine() == VK_TMP_OFF || !hl_wanted() || !hlp_read(&img, &fmt, &w, &h, &f)) return 0;
+    return img && f != frame;
 }
 
 static int retarget_wanted(uint32_t sw, uint32_t sh) {
@@ -1262,9 +1326,10 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
     // Keep the whole temporal section direct: otherwise both threads record the same command buffer and command pool.
     int rec_saved = rec_suspend();
     tmp_fence = ex->fence, tmp_cb = cb;
+    if (ex->fence > T.use_fence) T.use_fence = ex->fence;
     int slot = (int)(T.frame % FG_SLOTS);
     Own *MV = &R.mvs[slot], *Z = &R.zs[slot];
-    if (!own_image(MV, w, h, VK_FORMAT_R16G16_SFLOAT) || !own_image(Z, w, h, VK_FORMAT_R32_SFLOAT)) {
+    if (!own_image_x(MV, w, h, VK_FORMAT_R16G16_SFLOAT, 1) || !own_image_x(Z, w, h, VK_FORMAT_R32_SFLOAT, 1)) {
         rec_resume(rec_saved);
         return 0;
     }
@@ -1436,12 +1501,15 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
         T.evals++;
         T.jw = w, T.jh = h, T.jdepth = T.depth.image;
         // the frame generation's inputs (vk_tmp_fg_inputs)
+        fs_begin(&FS[slot]);
+        FS[slot].mv = MV->img, FS[slot].mvv = MV->view, FS[slot].z = Z->img, FS[slot].zv = Z->view;
         FS[slot].frame = T.frame, FS[slot].w = w, FS[slot].h = h, FS[slot].jx = jx, FS[slot].jy = jy;
         FS[slot].znear = znear, FS[slot].zfar = zfar, FS[slot].fov = fov, FS[slot].frame_ms = frame_ms;
         FS[slot].aspect = T.cam[7 * 4 + 0] != 0 ? fabsf(T.cam[8 * 4 + 1] / T.cam[7 * 4 + 0]) : 1.777f;
         FS[slot].reset = reset_was;
         memcpy(FS[slot].cam, T.cam, sizeof T.cam);
         memcpy(FS[slot].m, m, sizeof m);
+        fs_end(&FS[slot]);
     }
     rec_resume(rec_saved);
     vk_exec_draw_forget();
@@ -1451,21 +1519,50 @@ static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_dr
     return ok;
 }
 
-int vk_tmp_fg_inputs(uint64_t frame, VkTmpFgInputs *out) {
-    int s = (int)(frame % FG_SLOTS);
-    if (!frame || FS[s].frame != frame || !R.mvs[s].img) return 0;
-    out->mv = R.mvs[s].img, out->mv_view = R.mvs[s].view;
-    out->depth = R.zs[s].img, out->depth_view = R.zs[s].view, out->depth_fmt = VK_FORMAT_R32_SFLOAT;
-    out->w = FS[s].w, out->h = FS[s].h, out->jx = FS[s].jx, out->jy = FS[s].jy, out->reset = FS[s].reset;
-    memcpy(out->cam, FS[s].cam, sizeof out->cam);
-    memcpy(out->m, FS[s].m, sizeof out->m);
-    out->near_ = FS[s].znear, out->far_ = FS[s].zfar, out->fov_y = FS[s].fov, out->aspect = FS[s].aspect;
-    out->frame_ms = FS[s].frame_ms;
+int vk_tmp_fg_inputs(uint64_t frame, VkTmpFgInputs *out) {   // the present thread
+    FgSlot f;
+    if (!frame || !fs_read(&FS[frame % FG_SLOTS], &f) || f.frame != frame || !f.mv) return 0;
+    out->mv = f.mv, out->mv_view = f.mvv;
+    out->depth = f.z, out->depth_view = f.zv, out->depth_fmt = VK_FORMAT_R32_SFLOAT;
+    out->w = f.w, out->h = f.h, out->jx = f.jx, out->jy = f.jy, out->reset = f.reset;
+    memcpy(out->cam, f.cam, sizeof out->cam);
+    memcpy(out->m, f.m, sizeof out->m);
+    out->near_ = f.znear, out->far_ = f.zfar, out->fov_y = f.fov, out->aspect = f.aspect;
+    out->frame_ms = f.frame_ms;
     out->frame = frame;
     return 1;
 }
 
 // ---------------------------------------------------------------- frame boundaries
+
+// The upscaler turned off (live): its images (~0.4 GiB at 4K: the output, the screen target at the output's size, the
+// motion vectors, depth and picture without the HUD) and DLSS features go once the last submission that used them is
+// done, and those frame generation reads once it no longer can (own_retire). PR 462 review: they stayed allocated.
+// FSR 3.1's contexts stay (vk_tmp_ffx.c makes them again only at another size).
+static void release_images(void) {
+    uint64_t f = T.use_fence;
+    uint64_t bytes = 0;
+    Own *own[] = {&R.outimg, &R.big, &R.prevc, &R.casimg, &HL.snap};
+    for (size_t i = 0; i < sizeof own / sizeof *own; i++) bytes += 4ull * own[i]->w * own[i]->h, own_retire(own[i], f, 0);
+    for (int i = 0; i < FG_SLOTS; i++) {
+        fs_begin(&FS[i]);
+        FS[i].frame = 0, FS[i].mv = FS[i].z = VK_NULL_HANDLE, FS[i].mvv = FS[i].zv = VK_NULL_HANDLE;
+        fs_end(&FS[i]);
+        bytes += 4ull * R.mvs[i].w * R.mvs[i].h + 4ull * R.zs[i].w * R.zs[i].h;
+        own_retire(&R.mvs[i], f, 1), own_retire(&R.zs[i], f, 1);
+    }
+    hlp_publish(VK_NULL_HANDLE, VK_FORMAT_UNDEFINED, 0, 0, 0);
+    if (HL.out) bytes += 4ull * HL.out_w * HL.out_h, gone_retire(HL.out, HL.out_mem, VK_NULL_HANDLE, f, 1);
+    HL.out = VK_NULL_HANDLE, HL.out_frame = HL.snap_frame = 0, HL.dst = VK_NULL_HANDLE;
+    for (int i = 0; i < FEATS; i++)
+        if (FC[i].feat) {
+            if (f) vk_completion_add(f, feat_release, FC[i].feat);
+            else feat_release(FC[i].feat);
+            FC[i].feat = NULL;
+        }
+    rt_log("temporal: the upscaler is off: its images (~%llu MiB) and features released",
+           (unsigned long long)(bytes >> 20));
+}
 
 void vk_tmp_present(uint64_t frame) {
     read_cfg();
@@ -1488,6 +1585,8 @@ void vk_tmp_present(uint64_t frame) {
     T.pre = (Img){0};
     T.smaa_out = VK_NULL_HANDLE;
     RT.on = 0;
+    if (T.engine == VK_TMP_OFF && (R.outimg.img || R.big.img || R.mvs[0].img || HL.out || HL.snap.img))
+        release_images();
     if (frame % 1800 == 0 && RT.frames)
         rt_log("temporal: the screen target at %ux%u in %llu frames (%llu passes moved there)", R.big.w, R.big.h,
                (unsigned long long)RT.frames, (unsigned long long)RT.swaps);

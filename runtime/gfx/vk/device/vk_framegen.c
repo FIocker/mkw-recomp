@@ -39,6 +39,7 @@
 #include "hacks.h"
 #include "vk_temporal.h"
 #include "host.h"
+#include "platform/platform.h"
 
 #define SLOTS 4
 #define GAP_NS 100000000ull
@@ -152,7 +153,7 @@ static float knob(const char *name, float def) {
 }
 
 static int init(VkCtx *c) {
-    F.tried = 1;
+    __atomic_store_n(&F.tried, 1, __ATOMIC_RELEASE);   // read by vk_fg_retire on other threads
     F.push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
     if (!F.push) {
         rt_log("vk: frame generation off: no VK_KHR_push_descriptor");
@@ -1195,8 +1196,81 @@ static void bypass_order(void) {
     else rt_log("vk: frame generation bypass ordering failed (%d)", (int)r);
 }
 
+// Images of the upscaler that DLSS-G and FSR 3.1 read here on the present thread (a frame's motion vectors and depth,
+// the picture without the HUD), retired by the replay (a size change, the upscaler turned off): the replay's fences
+// say only that its own work is done, and the present thread makes frames for a game frame after the replay has gone
+// on (PR 462 review: HL.out and FS[] read without a lock). An image retired at game frame r may be read by the
+// generation of the frames before r: once the present thread is at r (vk_fg_game_frame) it is marked with the
+// submissions made so far (F.n), and freed once each of those has had its fence waited (SLOTS submissions later,
+// vk_fg_frame), or at once when no generation is in flight.
+typedef struct Retired {
+    void (*fn)(void *);
+    void *arg;
+    uint64_t frame, mark;
+    int marked;
+    struct Retired *next;
+} Retired;
+static PlatMutex retire_lk = PLAT_MUTEX_INIT;
+static Retired *retired;
+
+void vk_fg_retire(uint64_t frame, void (*fn)(void *), void *arg) {   // any thread
+    plat_mutex_lock(&retire_lk);
+    if (!__atomic_load_n(&F.tried, __ATOMIC_ACQUIRE)) {   // frame generation never ran: nothing here reads it
+        plat_mutex_unlock(&retire_lk);
+        fn(arg);
+        return;
+    }
+    Retired *e = malloc(sizeof *e);
+    if (!e) rt_fatal("vk: out of memory");
+    *e = (Retired){fn, arg, frame, 0, 0, retired};
+    retired = e;
+    plat_mutex_unlock(&retire_lk);
+}
+
+// The present thread: after the slot's fence wait in vk_fg_frame (idle 0), or with no generation in flight (idle 1;
+// a later generation is of a frame at or past the mark, which reads the new images). force: the device's end.
+static void retire_drain(int idle, int force) {
+    Retired *done = NULL;
+    plat_mutex_lock(&retire_lk);
+    for (Retired **p = &retired; *p;) {
+        Retired *e = *p;
+        if (!e->marked && (force || vk_fg_game_frame >= e->frame)) e->marked = 1, e->mark = F.n;
+        if (e->marked && (force || idle || F.n >= e->mark + SLOTS)) {
+            *p = e->next;
+            e->next = done, done = e;
+        } else {
+            p = &e->next;
+        }
+    }
+    plat_mutex_unlock(&retire_lk);
+    int n = 0;
+    while (done) {
+        Retired *e = done;
+        done = e->next;
+        e->fn(e->arg);
+        free(e);
+        n++;
+    }
+    static int logged;
+    if (n && logged < 10)
+        logged++, rt_log("vk: frame generation: %d retired images of the upscaler freed at game frame %llu%s", n,
+                         (unsigned long long)vk_fg_game_frame, idle ? " (no generation in flight)" : "");
+}
+
+// No generation in flight: every slot's fence is signalled (the present thread owns them)
+static int fg_idle(void) {
+    const VkCtx *c = vk_ctx();
+    if (!F.ok || !c) return 1;
+    for (int i = 0; i < SLOTS; i++)
+        if (F.fence[i] && vkGetFenceStatus(c->device, F.fence[i]) != VK_SUCCESS) return 0;
+    return 1;
+}
+
 int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkImage out[VK_FG_MAX], int *w, int *h,
                 uint64_t *step) {
+    // the upscaler's retired images: before this call's submission, F.n >= mark + SLOTS means every submission made
+    // before the mark had its fence waited by an earlier call (each waits the one SLOTS before it)
+    if (__atomic_load_n(&retired, __ATOMIC_RELAXED)) retire_drain(fg_idle(), 0);
     // the game's frame interval: an average of the pacer's display times, a hitch left out
     int gap = !F.last_at || at <= F.last_at || at - F.last_at > GAP_NS;
     if (!gap) {
@@ -1374,6 +1448,7 @@ VkImage vk_fg_flow(int level, int *gw, int *gh) {
 
 void vk_fg_release(void) {
     VkCtx *c = vk_ctx();
+    retire_drain(1, 1);   // at the device's end, after its wait for idle
     if (!c || !F.tried) return;
     vk_of_release();
     if (D.buf) vmaDestroyBuffer(c->vma, D.buf, D.alloc);

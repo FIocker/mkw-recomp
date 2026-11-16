@@ -157,6 +157,9 @@ double vk_present_refresh_hz(void);   // the window's monitor, 0 unknown
 // ---- frame generation (vk_framegen.c), the present thread
 #define VK_FG_MAX 4   // frames shown per game frame at most
 extern uint64_t vk_fg_game_frame;   // the game frame the present thread makes frames for (vk_framegen.c)
+// An image of the upscaler that frame generation may read on the present thread, retired by the replay at game frame
+// frame: fn(arg) once no generation can read it (vk_framegen.c)
+void vk_fg_retire(uint64_t frame, void (*fn)(void *), void *arg);
 extern VkFormat vk_fg_src_format, vk_fg_out_format;   // its picture's format, and the format of the frames handed out
 VkQueue vk_fg_queue(void);   // the queue frame generation's frames are written on (their blits go there), 0: the game's
 void vk_present_queue(VkQueue q);
