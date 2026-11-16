@@ -65,9 +65,13 @@ The standalone provider harness uses `MKW_PROBE_NO_NGX=1`, `MKW_VK_TEX_POOL_MIN=
 initializing unrelated NGX state and game memory pools. `MKW_FSR_PROBE_SHUTDOWN=1` then tears down the device explicitly,
 which avoids validation-loader teardown stalls and is separate from the measured interpolation result.
 
-Experimental motion controls default off: `MKW_FG_NVOF` uses the Vulkan hardware optical-flow queue on supported NVIDIA
-devices; `MKW_FG_NVOF_GRID=1|2|4` changes its vector grid (default 4). `MKW_FG_NVOF_GEOMETRY`, `MKW_FG_NVOF_REFINE`, and
-`MKW_FG_NVOF_CAMERA` test depth classification, endpoint correspondence, and camera agreement respectively. Race captures
-still show artifacts with each of these controls; none is an accepted quality fix. `MKW_FSR_FG_FLAT_DEPTH=1` supplies a
+FSR frame generation's motion: on devices with `VK_NV_optical_flow` the hardware optical-flow queue supplies the image
+motion of objects that camera reprojection cannot (rivals, the kart's wheels); on by default, `MKW_FG_NVOF=0` opts out,
+`MKW_FG_NVOF_GRID=1|2|4` changes its vector grid (default 4). The provider's game-vector field stage is replaced by a
+source-built kernel (`runtime/gfx/vk/spv/ffx_game_field_spv.h`, reproducible with `tools/ffx/build.py`, matched to the
+official shader by SHA-256 before it is substituted) that keeps verified stationary surfaces still: the asset-free
+64-pixel-motion probe's shadow error falls from 41.429/255 to zero. `MKW_FG_NVOF_GEOMETRY`, `MKW_FG_NVOF_REFINE`, and
+`MKW_FG_NVOF_CAMERA` (default off) test depth classification, endpoint correspondence, and camera agreement respectively;
+race captures still show artifacts with each of them, none is an accepted quality fix. `MKW_FSR_FG_FLAT_DEPTH=1` supplies a
 separate constant depth image to isolate SDK reconstruction; it never changes the game's depth and also does not fix the
 shadow defect. These controls are diagnostic experiments, not recommended player settings.
