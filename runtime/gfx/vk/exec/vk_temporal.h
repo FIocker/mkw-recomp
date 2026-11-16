@@ -39,6 +39,7 @@ void vk_tmp_present_size(uint32_t w, uint32_t h);   // the size of the picture t
 int vk_tmp_target(VkExecTarget *t);
 void vk_tmp_scale_rect(const VkExec *ex, float *x, float *y, float *w, float *h);
 void vk_tmp_sampled(VkImage *image, VkImageView *view);
+int vk_tmp_memo_skip(VkImage image);   // not for the texture descriptor memo (vk_exec_bind.c): what vk_tmp_sampled swaps
 
 // What the last evaluation left for frame generation (vk_framegen.c): depth and motion vectors at the render size, the
 // jitter, and whether the history was reset. 0 when the frame had no temporal upscale.

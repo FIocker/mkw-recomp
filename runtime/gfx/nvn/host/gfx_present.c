@@ -1097,7 +1097,8 @@ void gfx_window_release_vk(void) {
         }
         if (g_pool) vkDestroyCommandPool(c->device, g_pool, NULL);
         vk_lat_swapchain(1, VK_NULL_HANDLE);
-        if (g_sc) pw_hold(1), vk_rfx_swapchain_destroying(g_sc), vkDestroySwapchainKHR(c->device, g_sc, NULL);
+        // (hold released after: left on, the present-wait thread slept through every later swapchain; PR 462 review)
+        if (g_sc) pw_hold(1), vk_rfx_swapchain_destroying(g_sc), vkDestroySwapchainKHR(c->device, g_sc, NULL), pw_hold(0);
         vk_lat_swapchain(0, VK_NULL_HANDLE);
         if (g_surface) vkDestroySurfaceKHR(c->instance, g_surface, NULL);
         g_sc = VK_NULL_HANDLE; g_surface = VK_NULL_HANDLE; g_pool = VK_NULL_HANDLE; g_sc_n = 0;

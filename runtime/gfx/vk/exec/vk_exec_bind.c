@@ -364,7 +364,7 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
     uint32_t gen = vk_texture_slots_gen(), ep = vk_texture_epoch(), sg = vk_sampler_gen();   // before any lookup
     typeof(TD[0]) *m = &TD[(h * 0x9E3779B97F4A7C15ull ^ (uint64_t)r->type << 7 ^ (uint64_t)separate) >> 51];
     if (m->valid && m->h == h && m->type == r->type && m->separate == separate && m->sgen == sg &&
-        slot_still(&m->gen, m->tok, h, gen)) {
+        slot_still(&m->gen, m->tok, h, gen) && !vk_tmp_memo_skip(m->image)) {
         td_stat[0]++;
         if (m->epoch != ep) {   // the slot's first binding in this submission: only its storage check is due
             // unless another thread (a chunk of MKW_REPLAY_PAR, lpc1) already made it in this submission;
@@ -405,7 +405,7 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
     if (ru_cap) ru_note_tex(h, image, 0);
     if (pd_on) td_stat[4] += plat_cycles() - t0;
     *m = (typeof(*m)){.h = h, .tok = tok, .gen = gen, .epoch = ep, .sgen = sg, .type = r->type,
-                      .separate = (uint8_t)separate, .valid = 1, .image = image, .out = *out};
+                      .separate = (uint8_t)separate, .valid = !vk_tmp_memo_skip(image), .image = image, .out = *out};
 }
 
 static void support_in(const VkExec *ex, float in[3]) {   // what support_fill reads: viewport size, point size

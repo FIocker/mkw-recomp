@@ -1,21 +1,37 @@
 # DLSS, FSR 3.1, frame generation and Reflex
 
-Optional, off by default. Settings in `mkw.ini` (section `[display]`) or the F1 menu's Screen tab.
+Optional, off by default. Settings in `mkw.ini` (section `[display]`) or the F1 menu's Screen tab. DLSS, DLSS Frame
+Generation and Reflex need NVIDIA's driver pieces loaded when the game starts: turned on from off in the menu, they
+apply after a restart, and the menu says so under their row ("Not available on this PC" when the GPU or driver cannot
+run them; the game's own picture and pacing stay).
 
 | Setting | Values | What it does |
 |---|---|---|
-| `temporal` | `off`, `dlss`, `fsr3` | NVIDIA DLSS Super Resolution (RTX GPUs; `nvngx_dlss.dll` next to `mkw.exe`) or AMD FSR 3.1 (any GPU; `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll`, or the older `amd_fidelityfx_vk.dll`, next to `mkw.exe`) in the place of the game's own upscale. Live |
+| `temporal` | `off`, `dlss`, `fsr3` | NVIDIA DLSS Super Resolution (RTX GPUs; `nvngx_dlss.dll` next to `mkw.exe`) or AMD FSR 3.1 (any GPU; `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll`, or the older `amd_fidelityfx_vk.dll`, next to `mkw.exe`) in the place of the game's own upscale. FSR 3.1 live; DLSS at the next start when the game started without it. Without a usable engine the game keeps its own resolution and the log says why |
 | `temporal_quality` | `native`, `quality`, `balanced`, `performance`, `ultra` | The share of the screen's lines the race renders at (100, 67, 58, 50, 33 %). The game renders at most 1440 lines. At the next start |
 | `dlss_preset` | `default`, `j`, `k`, `l`, `m` | DLSS's model. Live |
 | `temporal_sharpness` | `0`..`100` | FSR 3.1's sharpening. Live |
 | `cas` | `off`, `on` | AMD's contrast adaptive sharpening (CAS) of the race after DLSS, DLAA or FSR 3.1, before the HUD. Needs `temporal` on. Live |
 | `cas_sharpness` | `0`..`100` | CAS's strength. Live |
 | `framegen` | `off`, `auto`, `2`, `3`, `4` | Frames shown per game frame (the port's existing setting) |
-| `fg_engine` | `flow`, `dlss`, `fsr3` | Who makes those frames: the port's optical flow, DLSS Frame Generation (RTX 40/50; `nvngx_dlssg.dll` next to `mkw.exe`; up to 4x on RTX 50) or FSR 3.1 frame generation (2x; `amd_fidelityfx_framegeneration_vk.dll`). DLSS-G and FSR FG need `temporal` on: they use its depth and motion vectors. Live |
-| `reflex` | `off`, `on`, `boost` | NVIDIA Reflex through `VK_NV_low_latency2`. Live |
+| `fg_engine` | `flow`, `dlss`, `fsr3` | Who makes those frames: the port's optical flow, DLSS Frame Generation (RTX 40/50; `nvngx_dlssg.dll` next to `mkw.exe`; up to 4x on RTX 50) or FSR 3.1 frame generation (2x; `amd_fidelityfx_framegeneration_vk.dll`). DLSS-G and FSR FG need `temporal` on: they use its depth and motion vectors. Live, but DLSS-G at the next start when the game started without DLSS |
+| `reflex` | `off`, `on`, `boost` | NVIDIA Reflex through `VK_NV_low_latency2`. Live once the game started with it on; from off, at the next start |
 
 With `resolution = 2160` (or a window taller than 1440 lines with `temporal` on), the upscaler writes the full output
 resolution and the HUD is drawn at it too (`MKW_TEMPORAL_RETARGET=0` turns that off).
+
+## With everything off
+
+Nothing of this changes the game: the device is made with the same extensions and one queue, the game's tick is the
+console's 60 Hz, and NGX is not loaded. What frame generation needs is taken only when it is asked for:
+
+| Switch | Unset | What it does |
+|---|---|---|
+| `MKW_VSYNC_LOCK` | on with frame generation | The game's tick locked to the display's refresh (59.94 or 119.88 Hz: the game runs 0.1 % slower), so frames do not drift across its vblanks. `1` always, `0` never |
+| `MKW_PHASE_LOCK` | on with frame generation at start | A thread waits for each present (`VK_KHR_present_wait`) and moves the flips half a refresh away from a vblank. `1` always, `0` never |
+| `MKW_FG_QUEUE` | on with frame generation at start | Frame generation's work on a second queue of the graphics family. `1` always, `0` one queue |
+| `MKW_ACQUIRE_HIRES` | off | The wait for a swapchain image with the high-resolution timer instead of millisecond sleeps (measured on one Windows machine: waits for an A/B on more) |
+| `MKW_TEMPORAL_NGX` | with DLSS or DLSS-G at start | Load NGX. `1` always, `0` never |
 
 ## How it works
 

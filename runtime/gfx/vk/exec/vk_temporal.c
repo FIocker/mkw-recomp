@@ -915,6 +915,12 @@ void vk_tmp_sampled(VkImage *image, VkImageView *view) {
     if (hl_redo && HL.dst && *image == HL.dst && HL.snap.view) *image = HL.snap.img, *view = HL.snap.view;
 }
 
+// The texture descriptor memo (vk_exec_bind.c tex_info) keys on the slot, not on this frame's substitution: kept for
+// the screen target, a texture that samples it read the game's small picture once the upscaler ran, or R.big's view
+// after it was turned off or remade at another size (a destroyed view). Neither image is kept, and a hit on the screen
+// target looks it up again. (Read without a lock as vk_tmp_sampled is: the recording thread sets RT.)
+int vk_tmp_memo_skip(VkImage image) { return image && (image == RT.src || image == R.big.img); }
+
 void vk_tmp_hl_seen(VkImage image) {   // VK_NULL_HANDLE: a draw starts
     if (!image) hl_saw = 0;
     else if (image == HL.dst && HL.snap_frame == T.frame) {
