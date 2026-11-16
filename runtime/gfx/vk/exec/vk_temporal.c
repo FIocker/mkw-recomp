@@ -56,6 +56,8 @@ static const struct { const char *name; int permille; } qualities[] = {
     {"native", 1000}, {"quality", 667}, {"balanced", 580}, {"performance", 500}, {"ultra", 333},
 };
 
+int romfs_resolution_scene_permille(void);   // sdk/fs/romfs_res.c
+
 int vk_tmp_engine(void) {
     const char *v = cfg_value("MKW_TEMPORAL");
     return !strcmp(v, "dlss") ? VK_TMP_DLSS : !strcmp(v, "fsr3") ? VK_TMP_FSR3 : VK_TMP_OFF;
@@ -135,6 +137,7 @@ static struct {
     PFN_NgxRelease release;
     PFN_NgxShutdown1 shutdown1;
     int tried, loaded, up, dlss;   // up: NGX initialised on the device; dlss: DLSS available
+    int wanted_at_start;           // ngx_wanted said yes (the menu: a missing NGX is not a restart away)
     int fg_max;                    // DLSS Frame Generation: generated frames per rendered one this GPU allows, 0 none
     NgxParam *capsp;
 } N;
@@ -169,10 +172,18 @@ static int ngx_dir_from_adapter(char *dir, DWORD size) {
 #endif
 
 static int ngx_wanted(void) {
-    // NGX comes up whenever its core is there, so the menu can switch to DLSS without a restart: NGX's extensions
-    // cost nothing unused. MKW_TEMPORAL_NGX=0 leaves it out entirely.
+    // NGX (NVIDIA's _nvngx.dll in the process, initialised on the device, with instance and device extensions of its
+    // own) only when DLSS is asked for at start: MKW_TEMPORAL=dlss, or frame generation with MKW_FG_ENGINE=dlss. Every
+    // other player keeps main's process and device (PR 462 review); DLSS picked later in the menu comes after a
+    // restart, and the menu says so (vk_tmp_menu_state). MKW_TEMPORAL_NGX=1 forces it, =0 never.
     static int w = -1;
-    if (w < 0) w = rt_knob("TEMPORAL_NGX", "1") != 0;
+    if (w < 0) {
+        const char *v = cfg_get("MKW_TEMPORAL_NGX");
+        w = v && *v ? strcmp(v, "0") != 0
+                    : !strcmp(cfg_value("MKW_TEMPORAL"), "dlss") ||
+                      (vk_fg_wanted() && !strcmp(cfg_value("MKW_FG_ENGINE"), "dlss"));
+        if (!w) rt_log("temporal: NGX not loaded: DLSS is not asked for at start");
+    }
     return w;
 }
 
@@ -180,6 +191,7 @@ static int core_load(void) {
     if (N.tried) return N.loaded;
     N.tried = 1;
     if (!ngx_wanted()) return 0;
+    N.wanted_at_start = 1;
 #ifdef _WIN32
     char dir[MAX_PATH] = {0}, path[MAX_PATH + 32];
     DWORD n = sizeof dir;
@@ -215,6 +227,45 @@ static int core_load(void) {
 #else
     rt_log("temporal: DLSS is only wired on Windows in this build");
     return 0;
+#endif
+}
+
+// Before the device (romfs_res.c, when it writes the game's 3D resolution at start): whether the engine MKW_TEMPORAL
+// asks for can come up on this PC. Without one the scene keeps the game's own resolution: scaled down for an engine
+// that is not there, the game's bilinear upscale stretched it with nothing said (PR 462 review: all of Linux, AMD
+// and Intel with dlss, no DLL next to mkw.exe). DLSS: the NGX core and nvngx_dlss.dll next to mkw.exe; FSR 3.1: AMD's
+// DLL loads. A DLSS that still fails on the device is logged by read_cfg.
+int vk_tmp_engine_usable(void) {
+    int e = vk_tmp_engine();
+    if (e == VK_TMP_FSR3) return vk_tmp_ffx_load();
+    if (e != VK_TMP_DLSS || !core_load()) return 0;
+#ifdef _WIN32
+    char path[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
+    while (n && path[n - 1] != '\\') n--;
+    snprintf(path + n, MAX_PATH - n, "nvngx_dlss.dll");
+    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) return 1;
+    rt_log("temporal: no %s: DLSS unavailable", path);
+#endif
+    return 0;
+}
+
+// The menu's note under MKW_TEMPORAL or MKW_FG_ENGINE (key) for its value now: 0 none, 1 after a restart (NGX is
+// loaded only when DLSS is asked for at start), 2 not available on this PC.
+int vk_tmp_menu_state(const char *key) {
+    const char *v = cfg_value(key);
+    int fg = !strcmp(key, "MKW_FG_ENGINE");
+    if (!strcmp(v, "fsr3")) return vk_tmp_ffx_load() ? 0 : 2;
+    if (strcmp(v, "dlss")) return 0;
+#ifdef _WIN32
+    const VkCtx *c = vk_ctx();
+    if (c && c->props.vendorID != 0x10DE) return 2;   // not an NVIDIA GPU
+    if (!N.loaded) return N.wanted_at_start ? 2 : 1;
+    if (!N.up) return 2;
+    return (fg ? N.fg_max : N.dlss) ? 0 : 2;
+#else
+    (void)fg;
+    return 2;
 #endif
 }
 
@@ -404,6 +455,7 @@ static struct {
     float cas;                   // MKW_CAS on: MKW_CAS_SHARPNESS / 100, else -1
     int preset;                  // MKW_DLSS_PRESET: 0 NVIDIA's default, else the letter's index + 1
     unsigned cfg_seen;
+    int warned_scene;   // read_cfg: the scene scaled down for an engine that is not there, logged once
     // this frame
     int cam_ok;
     float cam[CAM_ROWS * 4];
@@ -443,9 +495,20 @@ static void read_cfg(void) {
     unsigned v = cfg_version();
     if (v == T.cfg_seen) return;
     T.cfg_seen = v;
-    T.engine = vk_tmp_engine();
+    int asked = vk_tmp_engine();
+    T.engine = asked;
     if (T.engine == VK_TMP_DLSS && !N.dlss) T.engine = VK_TMP_OFF;
     if (T.engine == VK_TMP_FSR3 && !vk_tmp_ffx_load()) T.engine = VK_TMP_OFF;
+    // the camera block from each submission's own copy (vk_usnap_peek): a host copy of every uniform snapshot, off in
+    // main, so only once an engine runs (it stays on after)
+    if (T.engine != VK_TMP_OFF) vk_usnap_host_wanted = 1;
+    if (asked != VK_TMP_OFF && T.engine == VK_TMP_OFF && romfs_resolution_scene_permille() && !T.warned_scene) {
+        // the scene was made smaller at start for an engine that did not come up: the game's own upscale stretches it
+        T.warned_scene = 1;
+        rt_log("temporal: WARNING: the 3D scene renders at %d/1000 of the screen's lines for an upscaler that is not "
+               "available; the game's own upscale stretches it (set MKW_TEMPORAL=off and restart)",
+               romfs_resolution_scene_permille());
+    }
     T.kart = cfg_bool("MKW_TEMPORAL_KART");
     const char *d = cfg_get("MKW_TEMPORAL_DEBUG");
     T.debug = !d ? 0 : !strcmp(d, "mv") ? 1 : !strcmp(d, "depth") ? 2 : !strcmp(d, "nojitter") ? 3 : 0;
@@ -527,7 +590,6 @@ static void capture_camera(VkExec *ex) {
 }
 
 static int run_upscaler(VkExec *ex, const Img *color, const Img *out, int via_draw);
-int romfs_resolution_scene_permille(void);   // sdk/fs/romfs_res.c
 static void trace_hash(const char *what, uint64_t h, const VkExec *ex);
 
 int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
@@ -1412,7 +1474,6 @@ void vk_tmp_present(uint64_t frame) {
 }
 
 void vk_tmp_device_init(void) {
-    vk_usnap_host_wanted = 1;   // the camera block is read from the submission's own copy (vk_usnap_peek)
     // Asset-free FSR/OFA probes can isolate their provider and device teardown from unrelated NGX initialization.
     const char *no_ngx = cfg_get("MKW_PROBE_NO_NGX");
     if (!(no_ngx && strcmp(no_ngx,"0"))) ngx_init();

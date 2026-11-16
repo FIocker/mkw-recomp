@@ -38,6 +38,7 @@ typedef enum {
     UI_MENU_REFLEX, UI_MENU_REFLEX_DESC,         // values: off, on, on + boost
     UI_MENU_REFLEX_BOOST,
     UI_MENU_TEMPORAL, UI_MENU_TEMPORAL_DESC,     // values: off (the game's own), DLSS, FSR 3.1
+    UI_MENU_NOT_AVAILABLE,                       // note under the upscaler, frame generation engine and Reflex rows
     UI_MENU_TEMPORAL_QUALITY, UI_MENU_TEMPORAL_QUALITY_DESC,
     UI_MENU_TQ_NATIVE, UI_MENU_TQ_QUALITY, UI_MENU_TQ_BALANCED, UI_MENU_TQ_PERFORMANCE, UI_MENU_TQ_ULTRA,
     UI_MENU_DLSS_PRESET, UI_MENU_DLSS_PRESET_DESC, UI_MENU_DLSS_PRESET_DEFAULT,

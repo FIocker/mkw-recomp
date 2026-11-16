@@ -676,7 +676,9 @@ static void sleep_until(uint64_t deadline) {
     // MKW_ACQUIRE_HIRES=ab compares the high-resolution timer already used by present with the old millisecond
     // acquire wait in one run. Keep the display deadline and the GPU release fence unchanged: only the OS wait differs.
     static int hires = -1;
-    if (hires < 0) hires = rt_knob("ACQUIRE_HIRES", "1");   // on: A/B ab2 (15/11/2026, timer_1ms 0): p90 window max 22.3 vs 33.7 ms
+    // off by default: A/B ab2 (15/11/2026, timer_1ms 0, one Windows machine) gave p90 window max 22.3 vs 33.7 ms;
+    // it changes every player's present wait, so it waits for an A/B on more machines (PR 462 review)
+    if (hires < 0) hires = rt_knob("ACQUIRE_HIRES", "0");
     if (RT_KNOB_ON(hires)) {
         plat_sleep_until_ns(deadline);
         return;

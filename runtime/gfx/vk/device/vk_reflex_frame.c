@@ -47,6 +47,15 @@ void vk_rfx_init(uint32_t spec_version) {
 
 int vk_rfx_available(void) { return L.r && vk_reflex_available(L.r); }
 
+// The menu's note under MKW_REFLEX: 0 none, 1 after a restart (VK_NV_low_latency2 is enabled only with Reflex asked
+// for at start, vk_device.c), 2 not available on this PC (no VK_NV_low_latency2: not an NVIDIA driver).
+int vk_rfx_menu_state(void) {
+    const VkCtx *c = vk_ctx();
+    if (!strcmp(cfg_value("MKW_REFLEX"), "off") || !c) return 0;
+    if (!c->low_latency2_have) return 2;
+    return L.r ? 0 : 1;
+}
+
 const void *vk_rfx_swapchain_pnext(VkSwapchainLatencyCreateInfoNV *storage, const void *next) {
     if (!L.r) return next;
     return vk_reflex_swapchain_pnext(L.r, storage, next, 1);

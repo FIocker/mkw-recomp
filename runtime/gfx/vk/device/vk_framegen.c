@@ -216,11 +216,14 @@ static int init(VkCtx *c) {
         !(F.fine = make_pipeline(c, F.layout, fg_flow_spv, sizeof fg_flow_spv, fine, 7)) ||
         !(F.full = make_pipeline(c, F.layout, fg_flow_spv, sizeof fg_flow_spv, full, 7)) ||
         !(F.median = make_pipeline(c, F.layout, fg_median_spv, sizeof fg_median_spv, NULL, 0)) ||
-        !(F.synth = make_pipeline(c, F.layout, fg_synth_spv, sizeof fg_synth_spv, NULL, 0)) ||
-        !(F.fsr_mvp = make_pipeline(c, F.fsr_layout, fg_fsr_mv_spv, sizeof fg_fsr_mv_spv, NULL, 0))) {
+        !(F.synth = make_pipeline(c, F.layout, fg_synth_spv, sizeof fg_synth_spv, NULL, 0))) {
         rt_log("vk: frame generation off: its pipelines could not be created");
         return 0;
     }
+    // FSR 3.1's motion from our flow: only that engine's; without it the flow engine still works (PR 462 review: in
+    // the chain above its failure turned all frame generation off)
+    if (!(F.fsr_mvp = make_pipeline(c, F.fsr_layout, fg_fsr_mv_spv, sizeof fg_fsr_mv_spv, NULL, 0)))
+        rt_log("vk: frame generation: FSR 3.1's motion pipeline could not be created; its frames use the game's vectors");
     VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = F.pool,
                                       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = SLOTS};
     VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
@@ -286,6 +289,21 @@ static int make_img(VkCtx *c, Img *m, uint32_t w, uint32_t h, VkFormat fmt, VkIm
     return vkCreateImageView(c->device, &vi, NULL, &m->view) == VK_SUCCESS;
 }
 
+// The pictures without the HUD for DLSS-G's and FSR 3.1's frames (hl, hlp; ~66 MiB at 4K): made the first time one of
+// those engines runs at this size, never for the flow engine (PR 462 review). Freed with the other images.
+static int ensure_hudless(VkCtx *c) {
+    if (F.hl.img) return 1;
+    if (!F.w || !make_img(c, &F.hl, (uint32_t)F.w, (uint32_t)F.h, VK_FORMAT_R8G8B8A8_UNORM,
+                          VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+        !make_img(c, &F.hlp, (uint32_t)F.w, (uint32_t)F.h, VK_FORMAT_R8G8B8A8_UNORM,
+                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        free_img(c, &F.hl), free_img(c, &F.hlp);
+        return 0;
+    }
+    F.hl_fresh = 1, F.hl_okp = 0;
+    return 1;
+}
+
 // The vector grid: one per 16x16 pixels, a texel of the sixteenth level
 static uint32_t grid(int n) { return ((uint32_t)n + 15) / 16; }
 
@@ -311,9 +329,7 @@ static int ensure_images(VkCtx *c, int w, int h) {
         ok = ok && make_img(c, &F.fl[i], i < 2 ? (gw + 1) / 2 : gw, i < 2 ? (gh + 1) / 2 : gh, VK_FORMAT_R16G16_SFLOAT, 0);
     for (int i = 0; i < VK_FG_MAX - 1; i++)
         ok = ok && make_img(c, &F.made[i], (uint32_t)w, (uint32_t)h, VK_FORMAT_R8G8B8A8_UNORM, XS);
-    ok = ok && make_img(c, &F.hl, (uint32_t)w, (uint32_t)h, VK_FORMAT_R8G8B8A8_UNORM, XS | XD) &&
-         make_img(c, &F.hlp, (uint32_t)w, (uint32_t)h, VK_FORMAT_R8G8B8A8_UNORM, XS | XD);
-    F.hl_fresh = 1;
+    // (the pictures without the HUD, hl and hlp, only for DLSS-G's and FSR 3.1's: ensure_hudless)
     if (!ok) {
         rt_log("vk: frame generation: no memory for its %dx%d images; off until the size changes", w, h);
         free_images(c);
@@ -711,6 +727,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
         // the same frame's picture without the HUD (vk_temporal.c), cropped the same way into an image of bb's format
         VkTmpPic hls, hl;
         const VkTmpPic *hlp = NULL;
+        if (!use_h) ensure_hudless(c);   // (without them: no picture without the HUD, as when the frame has none)
         Img *H = use_h ? &F.hhl : &F.hl;
         if (H->img && vk_tmp_fg_hudless(vk_fg_game_frame, &hls) && (int)hls.w == sw && (int)hls.h == sh &&
             hls.fmt == vk_fg_src_format) {
@@ -785,7 +802,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                     static int told;
                     if (!told++) rt_log("vk: FSR motion from hardware optical flow, %ux%u cells of %u pixels",
                                         F.of_result.wblocks, F.of_result.hblocks, F.of_result.grid);
-                } else if (mv_ready && flow_ready && !in.reset) {
+                } else if (mv_ready && flow_ready && !in.reset && F.fsr_mvp) {
                     static int still_mode = -1;
                     if (still_mode < 0) still_mode = rt_knob("FG_STILL_MV", "0");
                     const float pc[8] = {(float)in.w, (float)in.h, (float)cw, (float)ch, (float)gw, (float)gh,

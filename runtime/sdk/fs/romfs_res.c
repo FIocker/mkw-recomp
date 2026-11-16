@@ -34,9 +34,15 @@
 
 // The temporal upscalers (MKW_TEMPORAL, gfx/vk/exec/vk_temporal.c) render the 3D scene at a share of the screen's
 // lines (MKW_TEMPORAL_QUALITY) and take the place of the game's own upscale from the scene to the screen; in thousandths,
-// 0 when they are off. The same table as vk_temporal.c's.
+// 0 when they are off or the engine cannot come up on this PC (vk_tmp_engine_usable). The same table as vk_temporal.c's.
+int vk_tmp_engine_usable(void);   // gfx/vk/exec/vk_temporal.c
 static int temporal_permille(void) {
     if (!strcmp(cfg_value("MKW_TEMPORAL"), "off")) return 0;
+    if (!vk_tmp_engine_usable()) {
+        rt_log("temporal: MKW_TEMPORAL=%s is not available on this PC: the 3D scene keeps the game's own resolution",
+               cfg_value("MKW_TEMPORAL"));
+        return 0;
+    }
     static const struct { const char *name; int pm; } q[] = {
         {"native", 1000}, {"quality", 667}, {"balanced", 580}, {"performance", 500}, {"ultra", 333}};
     const char *v = cfg_value("MKW_TEMPORAL_QUALITY");

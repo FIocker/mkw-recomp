@@ -280,6 +280,13 @@ static void auto_undo(void) {
 
 // What the graphics card draws and how much, each row the console's by default: the preset first with the four rows it
 // sets hanging under it, then the resolution, then how fast frames come.
+// Under an upscaler, frame generation engine or Reflex row: its value applies after a restart (1), or this PC cannot
+// run it (2: the game's own picture and pacing stay)
+static void engine_note(int state) {
+    if (state == 1) opt_text(UI_MENU_AFTER_RESTART, true);
+    else if (state == 2) opt_text(UI_MENU_NOT_AVAILABLE, true);
+}
+
 static void tab_graphics(float scale) {
     opt_begin("##graphics", scale);
     static bool auto_test = getenv("MKW_LAUNCHER_AUTOSET") != nullptr;   // (test) once, as the button does
@@ -322,6 +329,7 @@ static void tab_graphics(float scale) {
         static const char *const vals[] = {"off", "dlss", "fsr3"};
         const char *names[3] = {menu_text(UI_MENU_PERF_OFF), "NVIDIA DLSS", "AMD FSR 3.1"};
         opt_choice_list("MKW_TEMPORAL", UI_MENU_TEMPORAL, vals, names, 3, UI_MENU_TEMPORAL_DESC);
+        engine_note(vk_tmp_menu_state("MKW_TEMPORAL"));
         static const char *const qv[] = {"native", "quality", "balanced", "performance", "ultra"};
         const char *qn[5] = {menu_text(UI_MENU_TQ_NATIVE), menu_text(UI_MENU_TQ_QUALITY), menu_text(UI_MENU_TQ_BALANCED),
                               menu_text(UI_MENU_TQ_PERFORMANCE), menu_text(UI_MENU_TQ_ULTRA)};
@@ -352,11 +360,13 @@ static void tab_graphics(float scale) {
         static const char *const vals[] = {"flow", "dlss", "fsr3"};
         const char *names[3] = {"MKW Recomp", "NVIDIA DLSS", "AMD FSR 3.1"};
         opt_choice_list("MKW_FG_ENGINE", UI_MENU_FG_ENGINE, vals, names, 3, UI_MENU_FG_ENGINE_DESC);
+        engine_note(vk_tmp_menu_state("MKW_FG_ENGINE"));
     }
     {   // NVIDIA Reflex (gfx/vk/device/vk_reflex_frame.c), live
         static const char *const vals[] = {"off", "on", "boost"};
         const char *names[3] = {menu_text(UI_MENU_PERF_OFF), menu_text(UI_MENU_ON), menu_text(UI_MENU_REFLEX_BOOST)};
         opt_choice_list("MKW_REFLEX", UI_MENU_REFLEX, vals, names, 3, UI_MENU_REFLEX_DESC);
+        engine_note(vk_rfx_menu_state());
     }
     opt_toggle("MKW_VRR", UI_MENU_VRR, UI_MENU_VRR_DESC);   // gfx/vk/device/vk_framegen.c fits, live
     opt_toggle("MKW_LOW_LATENCY", UI_MENU_LOW_LATENCY, UI_MENU_LOW_LATENCY_DESC);   // core/boot/frame_jit.c, live

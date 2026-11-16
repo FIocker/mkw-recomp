@@ -297,7 +297,12 @@ static int create_device(void) {
     OPTIONAL_EXT(has_provoking_vertex, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME, pv, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT);
     OPTIONAL_EXT(has_robustness2, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME, rob2, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT);
     OPTIONAL_EXT(has_device_fault, VK_EXT_DEVICE_FAULT_EXTENSION_NAME, fault, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT);
-    if (rt_knob("FG_NVOF", "1")) {
+    // Frame generation's optional device pieces (optical flow, occupancy priority, a second queue) only when it is
+    // asked for at start: a device every player creates keeps main's extensions (PR 462 review). Turned on later in
+    // the menu, frame generation works without them (the flow engine's own optical flow, one queue).
+    const int fg_start = vk_fg_wanted();
+    const char *nvof = cfg_get("MKW_FG_NVOF");   // =1 asks for it without frame generation (--probe-oflow)
+    if ((fg_start || (nvof && !strcmp(nvof, "1"))) && rt_knob("FG_NVOF", "1")) {
         OPTIONAL_EXT(has_oflow, VK_NV_OPTICAL_FLOW_EXTENSION_NAME, oflow, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV);
     }
     // Task and mesh programs; without it their draws are skipped.
@@ -369,17 +374,30 @@ static int create_device(void) {
         CHAIN(gpl, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT);
     }
     vk_tmp_device_exts(g_vk.instance, g_vk.phys, ep, ne, ext, &n_ext, 48);   // NGX's (vk_temporal.c)
-    // NVIDIA Reflex (vk_reflex_frame.c): VK_NV_low_latency2, and VK_KHR_present_id so its markers name the presents
+    // NVIDIA Reflex (vk_reflex_frame.c): VK_NV_low_latency2, and VK_KHR_present_id so its markers name the presents.
+    // Only when MKW_REFLEX is not off at start: with it the swapchain is made with latencyModeEnable, which changes
+    // the driver's present path for every NVIDIA player (PR 462 review). Turned on later in the menu: after a restart.
+    const int rfx_start = strcmp(cfg_value("MKW_REFLEX"), "off") != 0;
     for (uint32_t i = 0; i < ne; i++)
-        if (!strcmp(ep[i].extensionName, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) && n_ext < 46)
-            g_vk.low_latency2_spec = ep[i].specVersion, ext[n_ext++] = VK_NV_LOW_LATENCY_2_EXTENSION_NAME;
-    OPTIONAL_EXT(has_present_id, VK_KHR_PRESENT_ID_EXTENSION_NAME, presentid, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR);
-    if (g_vk.has_present_id)   // when each present reached the display: the vblank phase (gfx_present.c)
+        if (!strcmp(ep[i].extensionName, VK_NV_LOW_LATENCY_2_EXTENSION_NAME)) {
+            g_vk.low_latency2_have = 1;
+            if (rfx_start && n_ext < 46)
+                g_vk.low_latency2_spec = ep[i].specVersion, ext[n_ext++] = VK_NV_LOW_LATENCY_2_EXTENSION_NAME;
+        }
+    // VK_KHR_present_id and present_wait as in main: only for what reads them (Reflex's markers, the vblank clock of
+    // frame generation in gfx_present.c, MKW_LATENCY), never for every player; RADV hung on present waits (#43, #50).
+    const char *pl = cfg_get("MKW_PHASE_LOCK");
+    const int pl_forced = pl && *pl && strcmp(pl, "0");
+    const int want_wait = vk_lat_on() || pl_forced || (fg_start && !(pl && !strcmp(pl, "0")));
+    if (want_wait || g_vk.low_latency2_spec)
+        OPTIONAL_EXT(has_present_id, VK_KHR_PRESENT_ID_EXTENSION_NAME, presentid, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR);
+    if (g_vk.has_present_id && want_wait)   // when each present reached the display: the vblank phase (gfx_present.c)
         OPTIONAL_EXT(has_present_wait, VK_KHR_PRESENT_WAIT_EXTENSION_NAME, pwait,
                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR);
     // frame generation's compute at a lower SM occupancy beside the game's work (vk_framegen.c, MKW_FG_OCCUPANCY)
-    OPTIONAL_EXT(has_occupancy, VK_NV_COMPUTE_OCCUPANCY_PRIORITY_EXTENSION_NAME, occ,
-                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_OCCUPANCY_PRIORITY_FEATURES_NV);
+    if (fg_start)
+        OPTIONAL_EXT(has_occupancy, VK_NV_COMPUTE_OCCUPANCY_PRIORITY_EXTENSION_NAME, occ,
+                     VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_OCCUPANCY_PRIORITY_FEATURES_NV);
     free(ep);
 
     // The driver fills the chain with what it supports; the same chain then enables all of it (robustBufferAccess
@@ -440,7 +458,8 @@ static int create_device(void) {
     // Frame generation's work (its copies aside), its blits and its presents go to a second queue of the graphics
     // family (vk_framegen.c): on the game's queue each game submission waited behind the last frame's generation
     // (1.8-2.4 ms of GPU at 4K), and the game's fence waits pushed 4 % of its frames past 20 ms (ab-flip0, 15/11/2026).
-    // NX2navi makes queues of its own for its frame generation the same way. MKW_FG_QUEUE=0: one queue.
+    // NX2navi makes queues of its own for its frame generation the same way. Only with frame generation asked for at
+    // start (MKW_FG_QUEUE=1 forces it, =0 never): without it the device keeps main's one queue.
     uint32_t gq = 1;
     g_vk.of_family = VK_QUEUE_FAMILY_IGNORED;
     {
@@ -450,7 +469,8 @@ static int create_device(void) {
         if (nf > 16) nf = 16;
         vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nf, qp);
         const char *e = cfg_get("MKW_FG_QUEUE");
-        if (g_vk.gfx_family < nf && qp[g_vk.gfx_family].queueCount >= 2 && !(e && !strcmp(e, "0"))) gq = 2;
+        int split = e && *e ? strcmp(e, "0") != 0 : fg_start;
+        if (g_vk.gfx_family < nf && qp[g_vk.gfx_family].queueCount >= 2 && split) gq = 2;
         if (g_vk.has_oflow && c->oflow.opticalFlow) {
             for (uint32_t i = 0; i < nf; i++)
                 if (qp[i].queueCount && (qp[i].queueFlags & VK_QUEUE_OPTICAL_FLOW_BIT_NV)) { g_vk.of_family = i; break; }

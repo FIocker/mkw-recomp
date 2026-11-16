@@ -14,6 +14,7 @@ int vk_tmp_engine(void);   // the engine the setting asks for now (VK_TMP_*)
 // The share of the screen's lines the 3D scene renders at for MKW_TEMPORAL_QUALITY, in thousandths; 1000 for native,
 // 0 when MKW_TEMPORAL is off (romfs_res.c reads it to write the game's 3D resolution).
 int vk_tmp_scene_permille(void);
+int vk_tmp_engine_usable(void);   // before the device: the engine asked for can come up here (romfs_res.c)
 
 // Device creation (vk_device.c): what NGX needs, added to the lists; after the device exists, NGX and FFX come up.
 void vk_tmp_instance_exts(const char **ext, uint32_t *n, uint32_t max);

@@ -237,7 +237,7 @@ static void present_main(void *arg) {
         // locked to the display its phase cannot sit on a vblank for the session (MKW_FG_VBLANK=0: at its time)
         static int clock_on = -1;
         if (clock_on < 0) clock_on = !(cfg_get("MKW_FG_VBLANK") && !strcmp(cfg_get("MKW_FG_VBLANK"), "0"));
-        if (!nf && clock_on) {
+        if (!nf && clock_on && vk_fg_wanted()) {   // (without frame generation, at its time as in main)
             uint64_t q = vk_present_flip_time(target);
             if (q) target = q;
         }

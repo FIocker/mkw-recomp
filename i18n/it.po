@@ -532,6 +532,10 @@ msgctxt "UI_MENU_TEMPORAL"
 msgid "AI upscaling"
 msgstr "Upscaling IA"
 
+msgctxt "UI_MENU_NOT_AVAILABLE"
+msgid "Not available on this PC: the game's own picture stays."
+msgstr "Non disponibile su questo PC: resta l'immagine originale del gioco."
+
 msgctxt "UI_MENU_TEMPORAL_DESC"
 msgid ""
 "Renders the race at a lower resolution and rebuilds it from several frames: NVIDIA DLSS (RTX "

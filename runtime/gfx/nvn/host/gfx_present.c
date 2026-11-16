@@ -103,14 +103,16 @@ double vk_present_refresh_hz(void) { return __atomic_load_n(&g_rate_mhz, __ATOMI
 // (16.683 ms) on a TV at 119.88 Hz instead of 16.667. At exactly 60 the presents drifted across the TV's vblanks and
 // every few seconds frames were shown for one refresh and the next for three: 44 frames held 25 ms in 45 s of race
 // with frame generation off (PresentMon, dep-off, 15/11/2026). The game counts presents (game.c), so it runs 0.1 %
-// slower in real time; sound has its own clock. MKW_VSYNC_LOCK=0: 60 Hz.
+// slower in real time; sound has its own clock. Only with frame generation asked for (MKW_FRAMEGEN not off), whose
+// made frames need the display's clock; without it the tick stays the console's 60 Hz as in main (PR 462 review,
+// 16/11/2026: everyone's game ran 0.1 % slow on 59.94 Hz screens). MKW_VSYNC_LOCK=1 forces it, =0 never.
 // ---- the vblank phase (VK_KHR_present_wait). With the tick locked to the display, the presents keep one phase against
 // its vblanks for the whole session; at a phase near a vblank a game frame shown for one refresh and the next for
 // three (or, with frame generation, two flips in one refresh and one dropped: 461 of 5231 in lock-dg, 15/11/2026)
 // went on for good. A thread of its own waits for each game frame's present (vkWaitForPresentKHR on its id) and
 // measures the time from vkQueuePresentKHR to the display; over 120 frames, a spread of half a refresh or more means
 // the flips straddle a vblank, and the pacer moves its phase by half a refresh (gfx_pace_nudge_take, nvn_api_obj.c).
-// MKW_PHASE_LOCK=0: off.
+// Like the tick: only with frame generation asked for; MKW_PHASE_LOCK=1 (or nudge) forces it, =0 never.
 static struct {
     PlatMutex m;
     PlatCond cv;
@@ -143,12 +145,14 @@ static volatile int64_t g_nudge;
 uint64_t gfx_vsync_tick_ns(void);
 int64_t gfx_pace_nudge_take(void) { return plat_xchg64(&g_nudge, 0); }
 
-static int phase_lock_on(void) {
-    static int on = -1;
-    if (on < 0) on = vk_ctx() && vk_ctx()->has_present_wait &&
-                     !(cfg_get("MKW_PHASE_LOCK") && !strcmp(cfg_get("MKW_PHASE_LOCK"), "0"));
-    return on;
+// A pacing switch of frame generation's (MKW_VSYNC_LOCK, MKW_PHASE_LOCK): "0" never, any other value always, unset
+// while frame generation is asked for. Read live: the menu turns frame generation on and off.
+static int fg_pacing(const char *key) {
+    const char *v = cfg_get(key);
+    return v && *v ? strcmp(v, "0") != 0 : vk_fg_wanted();
 }
+
+static int phase_lock_on(void) { return vk_ctx() && vk_ctx()->has_present_wait && fg_pacing("MKW_PHASE_LOCK"); }
 
 uint64_t vk_present_game_id(uint64_t frame) { return phase_lock_on() ? frame : 0; }
 
@@ -239,18 +243,21 @@ static void pw_hold(int on) {   // a swapchain goes: nothing waits on it (g_pl h
 }
 
 uint64_t gfx_vsync_tick_ns(void) {
-    static int on = -1;
-    if (on < 0) on = !cfg_get("MKW_VSYNC_LOCK") || strcmp(cfg_get("MKW_VSYNC_LOCK"), "0") != 0;
+    static uint64_t told;
+    static unsigned seen = ~0u;
+    static int on;
+    unsigned v = cfg_version();
+    if (v != seen) seen = v, on = fg_pacing("MKW_VSYNC_LOCK");
     double hz = vk_present_refresh_hz();
     if (on && hz > 40.0) {
         double k = floor(hz / 60.0 + 0.5);
         if (k >= 1.0 && fabs(hz / k - 60.0) < 0.3) {
             uint64_t t = (uint64_t)(1e9 * k / hz + 0.5);
-            static uint64_t told;
             if (told != t) told = t, rt_log("gfx: vsync tick %.4f ms, locked to the display's %.3f Hz", t / 1e6, hz);
             return t;
         }
     }
+    if (told) told = 0, rt_log("gfx: vsync tick back to the console's 60 Hz");
     return VSYNC_NS / VSYNC_HZ;
 }
 

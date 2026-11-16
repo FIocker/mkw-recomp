@@ -5,6 +5,7 @@
 
 void vk_rfx_init(uint32_t spec_version);   // after the device, with VK_NV_low_latency2's enabled revision (0: none)
 int vk_rfx_available(void);
+int vk_rfx_menu_state(void);   // the menu's note under MKW_REFLEX: 0 none, 1 after a restart, 2 not available
 const void *vk_rfx_swapchain_pnext(VkSwapchainLatencyCreateInfoNV *storage, const void *next);
 void vk_rfx_swapchain_created(VkSwapchainKHR sc);
 void vk_rfx_swapchain_destroying(VkSwapchainKHR sc);   // before vkDestroySwapchainKHR

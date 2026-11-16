@@ -63,6 +63,7 @@ typedef struct VkCtx {
     int has_present_wait;                   // VK_KHR_present_wait (gfx_present.c: the display's vblank phase)                      // VK_NV_compute_occupancy_priority (frame generation's compute)
     int has_present_id;                     // VK_KHR_present_id with presentId: Reflex's markers name the presents
     uint32_t low_latency2_spec;             // VK_NV_low_latency2's revision when enabled (Reflex, vk_reflex_frame.c), else 0
+    int low_latency2_have;                  // the device has VK_NV_low_latency2 (enabled only with MKW_REFLEX at start)
     int device_index;                       // index in vkEnumeratePhysicalDevices
 } VkCtx;
 enum { VK_FEEDBACK_OFF, VK_FEEDBACK_RESTART, VK_FEEDBACK_LAYOUT };
