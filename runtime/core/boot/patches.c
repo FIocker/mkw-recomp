@@ -419,7 +419,7 @@ static void output_size(const RtGame *g) {
             if (w > 0 && strcmp(cfg_value("MKW_PICTURE_FIT"), "stretch") && w < h * a) h = (int)(w / a + 0.5f);
             if (h >= 360 && h < native) lines = h;
             // with a temporal upscaler (gfx/vk/exec/vk_temporal.c) a taller window gets its own lines: the upscaler and
-            // the HUD then reach the window at its resolution instead of being scaled up from the game's output
+            // the HUD then reach the window at its resolution instead of being scaled up from the game's own output
             else if (h > native && strcmp(cfg_value("MKW_TEMPORAL"), "off")) lines = h;
         }
     }
