@@ -70,7 +70,7 @@ import build  # (GEN_FLAGS, module_glue, game_id: the same game code as build.py
 import game_texts  # (build_all: the game's texts in ca, gl, eu)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gamecode import compile_game
+from gamecode import DamagedSource, compile_game
 from gamesource import check, is_nx, loose_romfs, unpack
 from gamecopy import clear_dir, copy_tree, remove_stale
 from nup import Nup
@@ -170,6 +170,13 @@ def regenerate_if_cleaned(state: dict, keys: dict[str, str], work: Path) -> None
     (an update that touched only tools/build/build.py, as the first after 0.1.9) stopped on the missing layout.json."""
     if state["done"].get("compile") != keys["compile"] and not (work / "generated/layout.json").is_file():
         state["done"].pop("generate", None)
+
+
+def redo_exefs_if_missing(state: dict, game: Path) -> None:
+    """Undoes the exefs step when its copy is gone: the step is skipped by its key (source and version), and a folder
+    emptied or moved since made generate stop on "module main not in the layout" (#419), which names no cause."""
+    if "exefs" in state["done"] and not (game / "exefs/main").is_file():
+        state["done"].pop("exefs")
 
 
 GENERATOR = [
@@ -325,6 +332,7 @@ def main() -> None:
             "warm": f"{build.game_id()} {romfs_src}",
         })  # fmt: skip
         regenerate_if_cleaned(state, keys, work)
+        redo_exefs_if_missing(state, game)
         for step in STEPS[1:]:
             # The start screen sets up again when its version differs (launcher.cpp): an update by hand (a new
             # AppImage or zip over the old) kept the old steps (#50: 0.1.8 played with 0.1.7's shaders). Kept once the
@@ -368,7 +376,14 @@ def main() -> None:
             elif step == "generate":
                 generate(game / "exefs", work, gen_jobs, version, image)
             elif step == "compile":
-                compile_game(game, game / "exefs", work, cc, args.target, jobs)
+                try:
+                    compile_game(game, game / "exefs", work, cc, args.target, jobs)
+                except DamagedSource as e:  # once: a second damaged write is the disk or the memory, not chance
+                    print(f"{e}: generating again", file=sys.stderr)
+                    emit("step", "generate")
+                    generate(game / "exefs", work, gen_jobs, version, image)
+                    emit("step", "compile")
+                    compile_game(game, game / "exefs", work, cc, args.target, jobs)
             elif step == "shaders":
                 # extract.py reads a .nup itself; a .nx's shader archives are unpacked first
                 src_romfs = loose_romfs(runtime, romfs, work, "Shader", *SHADER_DIRS) if is_nx(romfs) else romfs

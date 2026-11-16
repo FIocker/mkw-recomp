@@ -38,7 +38,7 @@ static const char *const known[] = {
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
     "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
-    "BIND_ZL", "BIND_ZR", "BUTTON_ICONS", "CLASSIC_GP", "CORE_DIAG", "CRIT", "CRIT_OUT", "CTL", "DESC_TEMPLATE", "DETAIL_DISTANCE", "DEVICE_PROFILE", "DISCORD", "DISCORD_APP", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_DRAWS", "DUMP_DRAWS_RECT", "DUMP_DRAWS_SKIP", "DYN_DIFF", "DUMP_LOG",
+    "BIND_ZL", "BIND_ZR", "BUTTON_ICONS", "CLASSIC_GP", "CLASSIC_VS", "CORE_DIAG", "CRIT", "CRIT_OUT", "CTL", "DESC_TEMPLATE", "DETAIL_DISTANCE", "DEVICE_PROFILE", "DISCORD", "DISCORD_APP", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_DRAWS", "DUMP_DRAWS_RECT", "DUMP_DRAWS_SKIP", "DYN_DIFF", "DUMP_LOG",
     "EXEFS", "FEEDBACK", "FG_BIAS", "FG_DUMP", "FG_DUMP_DIR", "FG_LAMBDA", "FG_PROBE", "FIX_C0", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
     "FLIGHT_THUMBS", "FPS", "FRAMEGEN", "FREEZE_IDLE", "GLYPH_DUMP", "FREE_CORES", "FULLSCREEN", "GAME_DIR", "GPL", "GPL_DRAW_BUILD", "GPU",
     "GPU_CRUMBS", "GPU_CRUMBS_DRAW", "HDR", "HDR_FAKE", "GPU_INDEX", "GPU_MEM_LIMIT", "GPU_NAME", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LAN", "LAN_IP", "LANG", "LATENCY", "LOW_LATENCY",
@@ -52,7 +52,7 @@ static const char *const known[] = {
     "REPLAY_CHECK", "RESOLUTION", "RESOLVE_CHECK", "ROMFS", "RTSTATS", "ROMFS_MODS", "ROMFS_PATCHES",
     "RUMBLE", "RUMBLE_CURVE", "RUMBLE_STRENGTH", "RUMBLE_TRIGGERS",
     "SHADER_MEMO", "SHADOW_SIZE", "SHARED_FONTS", "SHARPNESS", "SHORTCUT_ASKED", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SPARSE_IMAGES", "SPARSE_MIB", "SPARSE_NO_BUFFER", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "STICK_DEADZONE", "SWITCH2", "SWKBD_ANSWER",
-    "SKIP_PROGRAMS", "SWKBD_TEST", "TEX_ALIAS", "TEX_MEMO", "TEX_QUALITY", "TEX_RELEASED_MIB", "TIMER_1MS", "TRACE", "TURBO", "TURBO_SPEED", "SKIP_MOVIES", "SEED", "UNLOCK_ALL", "QUICK_RACE", "FREEZE_KEYS", "QUALITY", "TRACE_UBO", "TRACE_UBO_OUT", "UBO_SNAPSHOT", "UPSCALER", "VRR", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
+    "SKIP_PROGRAMS", "SWKBD_TEST", "TEX_ALIAS", "TEX_MEMO", "TEX_QUALITY", "TEX_OVERWRITTEN", "TEX_RELEASED_MIB", "TIMER_1MS", "TRACE", "TURBO", "TURBO_SPEED", "SKIP_MOVIES", "SEED", "UNLOCK_ALL", "QUICK_RACE", "FREEZE_KEYS", "QUALITY", "TRACE_UBO", "TRACE_UBO_OUT", "UBO_SNAPSHOT", "UPSCALER", "VRR", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
     "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_TEX_POOL_MIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VRAM_LOG", "VRAM_MARGIN", "VS_OUTS",
     "UPDATE_AS", "UPDATE_CHECK", "UPDATE_REPO", "WINDOW_SIZE", "ZSTD_CHECK", "ZSTD_NATIVE",
     // temporal upscaling and frame generation (gfx/vk/exec/vk_temporal.c), Reflex (gfx/vk/device/vk_reflex.c)
@@ -87,7 +87,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"VK_DYN_VERTEX", "performance"}, {"VK_SUBGROUP_PIN", "performance"},
     {"TRACE", "diagnostics"}, {"FLIGHT", "diagnostics"}, {"FLIGHT_SPIKE_MS", "diagnostics"},
     {"TURBO", "hacks"}, {"TURBO_SPEED", "hacks"}, {"SKIP_MOVIES", "hacks"}, {"SEED", "hacks"}, {"UNLOCK_ALL", "hacks"}, {"FREEZE_KEYS", "hacks"},
-    {"QUICK_RACE", "hacks"}, {"CLASSIC_GP", "hacks"}, {"MODS", "launcher"}, {"MODS_ACK", "launcher"}, {"MODS_PLAYED", "launcher"},
+    {"QUICK_RACE", "hacks"}, {"CLASSIC_GP", "hacks"}, {"CLASSIC_VS", "hacks"}, {"MODS", "launcher"}, {"MODS_ACK", "launcher"}, {"MODS_PLAYED", "launcher"},
     {"UPDATE_CHECK", "launcher"}, {"DISCORD", "launcher"}, {"GAME_DIR", "launcher"}, {"PLAYER", "launcher"},
     {"SHORTCUT_ASKED", "launcher"},
 };
@@ -170,6 +170,7 @@ static const CfgMeta metas[] = {
     {"SKIP_MOVIES", "0", "0|1", LIVE}, {"SEED", "", NULL, RESTART},
     {"UNLOCK_ALL", "0", "0|1", RESTART}, {"FREEZE_KEYS", "0", "0|1", LIVE}, {"QUICK_RACE", "off", "off|tt|gp|free", RESTART},
     {"CLASSIC_GP", "0", "0|1", LIVE},   // core/hacks/classic.c: the cups' intermissions become laps on one course
+    {"CLASSIC_VS", "0", "0|1", LIVE},   // core/hacks/classic.c: VS races' routes become laps on one course
 };
 
 static int is_known(const char *key) {

@@ -388,6 +388,11 @@ def main() -> None:
         help="runtime with frame pointers: perf call graphs (-g) of where threads block, e.g. -e cs",
     )
     args = ap.parse_args()
+    # Absolute, not resolved (game/ is a link): ninja puts $in in each command and ccache hashes the input's path, so a
+    # relative --gen next to the absolute default rebuilt all 623 objects for real on every switch (16/11/2026).
+    for name in ("gen", "exefs", "romfs", "out"):
+        if getattr(args, name):
+            setattr(args, name, getattr(args, name).absolute())
     if args.runtime_only and not args.dist:
         ap.error("--runtime-only needs --dist")
     if HOST_WINDOWS and args.target != "windows":

@@ -21,6 +21,16 @@ from machine import Failed, crt_link, emit, package_dir
 LINK_TIMEOUT = 30 * 60  # far past a slow link: only a hung linker (issue #2: "stuck" after the last object)
 
 
+class DamagedSource(Failed):
+    """A generated C file with NUL bytes in it (#434: `uint6<NUL>_t` in main_0203.c, on Windows): the write that made it
+    did not reach the disk whole (a crash or power cut after the size grew). Generate's key still matches, so every retry
+    reused it and failed the same; prepare.py regenerates once on this."""
+
+
+def damaged(src: Path) -> bool:
+    return b"\0" in src.read_bytes()
+
+
 def write_link_response(rsp: Path, objects: list[Path], windows_quoting: bool) -> None:
     """Objects passed to the linker without the process command line's length limit."""
     # as_posix converts native Windows separators only: a backslash in a POSIX folder name is a literal character.
@@ -77,13 +87,7 @@ def compile_game(game: Path, exefs: Path, work: Path, cc: list[str], target: str
         if out.is_file() and stamp.is_file() and stamp.read_text() == key:
             return ""
         stamp.unlink(missing_ok=True)
-        r = subprocess.run(
-            [*cc, "-std=gnu11", *f, "-c", str(src), "-o", str(out)], capture_output=True, text=True, check=False
-        )
-        if r.returncode:
-            return f"{src.name}: {r.stderr.strip()[-300:]}"
-        stamp.write_text(key)
-        return ""
+        return compile_one(cc, f, src, out, stamp, key)
 
     lib = game / ("mkwgame.dll" if windows else "mkwgame.so")
     part = lib.with_name(lib.name + ".part")
@@ -116,6 +120,18 @@ def compile_game(game: Path, exefs: Path, work: Path, cc: list[str], target: str
     part.replace(lib)
     emit("progress", total, total)
     (game / "mkwgame.id").write_text(build.game_id())  # runtime/core/boot/gamelib.c rt_game_present
+
+
+def compile_one(cc: list[str], flags: list[str], src: Path, out: Path, stamp: Path, key: str) -> str:
+    """One object: "" when built, else the error for the player; a damaged source raises DamagedSource instead."""
+    r = subprocess.run([*cc, "-std=gnu11", *flags, "-c", str(src), "-o", str(out)], capture_output=True, text=True,
+                       check=False)  # fmt: skip
+    if r.returncode:
+        if damaged(src):
+            raise DamagedSource(f"compiling the game code failed: {src.name} has NUL bytes (a damaged write)")
+        return f"{src.name}: {r.stderr.strip()[-300:]}"
+    stamp.write_text(key)
+    return ""
 
 
 def chunk_base(cc: list[str], base_cpu: str, gen_headers: list[Path], src: Path) -> str:
