@@ -11,7 +11,7 @@
 
 #include "cfg.h"
 #include "host.h"
-#include "vk_latency.h"
+#include "vk_reflex_frame.h"
 #include "vk_temporal.h"
 #include "vk.h"
 #include "vk_defaults.h"
@@ -369,7 +369,7 @@ static int create_device(void) {
         CHAIN(gpl, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT);
     }
     vk_tmp_device_exts(g_vk.instance, g_vk.phys, ep, ne, ext, &n_ext, 48);   // NGX's (vk_temporal.c)
-    // NVIDIA Reflex (vk_latency.c): VK_NV_low_latency2, and VK_KHR_present_id so its markers name the presents
+    // NVIDIA Reflex (vk_reflex_frame.c): VK_NV_low_latency2, and VK_KHR_present_id so its markers name the presents
     for (uint32_t i = 0; i < ne; i++)
         if (!strcmp(ep[i].extensionName, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) && n_ext < 46)
             g_vk.low_latency2_spec = ep[i].specVersion, ext[n_ext++] = VK_NV_LOW_LATENCY_2_EXTENSION_NAME;
@@ -482,6 +482,7 @@ static int create_device(void) {
     VkResult r = vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.device);
     free(c);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateDevice failed (%d)", (int)r); return 0; }
+    vk_lat_device(g_vk.device, g_vk.has_present_wait);   // MKW_LATENCY's waiter (vk_latency.c)
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
     g_vk.fg_queue = g_vk.gfx_queue;
     if (gq == 2) vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 1, &g_vk.fg_queue);
@@ -592,7 +593,7 @@ static long g_errors_total;     // outlives the device so the probe can print it
 
 static void destroy_all(void) {
     gfx_window_release_vk();
-    vk_lat_shutdown();
+    vk_rfx_shutdown();
     if (g_vk.device) vkDeviceWaitIdle(g_vk.device);
     if (g_vk.device) vk_astc_release(), vk_crumbs_release(), vk_tmp_shutdown();
     if (g_vk.timeline) vkDestroySemaphore(g_vk.device, g_vk.timeline, NULL);
@@ -617,7 +618,7 @@ int vk_init(void) {
         memset(&g_vk, 0, sizeof g_vk);
         if (create_instance() && pick_device() && create_device())
             g_ready = 1, vk_crumbs_init(), vk_headroom_start(), vk_tex_pool_start(), vk_tmp_device_init(),
-            vk_lat_init(g_vk.low_latency2_spec);
+            vk_rfx_init(g_vk.low_latency2_spec);
         else destroy_all();
     }
     int ok = g_ready;

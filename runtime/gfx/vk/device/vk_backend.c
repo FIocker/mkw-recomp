@@ -27,7 +27,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
-#include "vk_latency.h"
+#include "vk_reflex_frame.h"
 #include "vk_temporal.h"
 #include "vk.h"
 #include "vk_exec.h"
@@ -49,6 +49,20 @@ static void wait_until(uint64_t at) {
     while (kern_now_ns() < at) plat_yield();
 }
 
+// Waits until at like wait_until, watching the timeline: how long before at the GPU finished value (the frame's last
+// blit), to the 0.5 ms; -1 when it had not by then.
+static int64_t ready_slack(uint64_t at, uint64_t value) {
+    uint64_t ready = 0;
+    for (;;) {
+        uint64_t now = kern_now_ns();
+        if (!ready && vk_sync_fence_done() >= value) ready = now;
+        if (now >= at) break;
+        if (at - now > 1000000) plat_wait_ns(500000);
+        else plat_yield();
+    }
+    return ready ? (int64_t)(at - ready) : -1;
+}
+
 // Frame generation's flips (MKW_FG_FLIP_THREAD, default on): the present thread hands each game frame's schedule
 // (its made frames, then its own, one step apart) to this thread and goes back for the next game frame at once. Held
 // on the present thread, the schedule kept the next game frame's job waiting up to a step past its display time, and
@@ -56,7 +70,7 @@ static void wait_until(uint64_t at) {
 // game frame went over 20 ms in 4 % of the race against none with frame generation off (ab-hl0, base-fgoff,
 // 15/11/2026). The swapchain keeps VK_FG_MAX images past its minimum with frame generation (gfx_present.c): two game
 // frames of 2x fit, and the present thread waits for flips only when the next frame's would not.
-typedef struct { int nf; uint64_t first, step, frame, queued; } FlipJob;
+typedef struct { int nf; uint64_t first, step, frame, queued, slot, value; } FlipJob;   // slot: display time; value: the blits' timeline value
 static PlatMutex fl_m = PLAT_MUTEX_INIT;
 static PlatCond fl_cv = PLAT_COND_INIT;
 static FlipJob fl_q[4];
@@ -91,6 +105,7 @@ static void flip_main(void *arg) {
         static int on_clock = -1;
         if (on_clock < 0) on_clock = !(cfg_get("MKW_FG_VBLANK") && !strcmp(cfg_get("MKW_FG_VBLANK"), "0"));
         uint64_t at = on_clock ? vk_present_flip_time(f.first > t0 ? f.first : t0) : 0;
+        frame_jit_slack(f.slot, ready_slack(at ? at : f.first, f.value));   // MKW_LOW_LATENCY (core/boot/frame_jit.c)
         for (int k = 1; k < f.nf; k++) {
             if (at) {
                 uint64_t now = kern_now_ns();
@@ -100,7 +115,7 @@ static void flip_main(void *arg) {
             } else {
                 wait_until(f.first + (uint64_t)(k - 1) * f.step);
             }
-            vk_present_flip();
+            vk_lat_flip(f.slot, k == 1, 0, vk_present_flip());   // MKW_LATENCY: the first made frame
             plat_mutex_lock(&fl_m);
             fl_images--;
             plat_cond_broadcast(&fl_cv);
@@ -110,10 +125,10 @@ static void flip_main(void *arg) {
         if (at && target < kern_now_ns()) target = vk_present_flip_time(kern_now_ns());
         wait_until(target);
         uint64_t t1 = kern_now_ns();
-        uint64_t pid = vk_lat_present_start(f.frame);   // Reflex: the game frame's present carries its id
+        uint64_t pid = vk_rfx_present_start(f.frame);   // Reflex: the game frame's present carries its id
         if (!pid) pid = vk_present_game_id(f.frame);   // (or the vblank phase's measure does)
-        vk_present_flip_id(pid);
-        vk_lat_present_end(pid);
+        vk_lat_flip(f.slot, f.nf <= 1, 1, vk_present_flip_id(pid));   // MKW_LATENCY: the game's own picture
+        vk_rfx_present_end(pid);
         trace_present(f.frame, t1, t0, target, f.queued, f.nf - 1);
         plat_mutex_lock(&fl_m);
         fl_images--;
@@ -194,7 +209,7 @@ static void present_main(void *arg) {
                 if (!plat_thread_spawn(flip_main, NULL, "vk flip", 0)) rt_fatal("vk: cannot start the flip thread");
                 fl_thread = 1;
             }
-            fl_q[(fl_head + fl_n) % 4] = (FlipJob){nf, first, step, j.frame, j.queued};
+            fl_q[(fl_head + fl_n) % 4] = (FlipJob){nf, first, step, j.frame, j.queued, j.at, f};
             fl_n++, fl_images += nf;
             plat_cond_broadcast(&fl_cv);
             plat_mutex_unlock(&fl_m);
@@ -202,9 +217,10 @@ static void present_main(void *arg) {
             plat_mutex_lock(&pl);
             continue;
         }
+        frame_jit_slack(j.at, ready_slack(nf ? first : j.at, f));   // MKW_LOW_LATENCY (core/boot/frame_jit.c)
         for (int k = 1; k < nf; k++) {
             wait_until(first + (uint64_t)(k - 1) * step);
-            vk_present_flip();
+            vk_lat_flip(j.at, k == 1, 0, vk_present_flip());   // MKW_LATENCY: the first made frame
         }
         uint64_t target = nf ? first + (uint64_t)(nf - 1) * step : j.at;
         // the game's frame alone: half a refresh before a vblank on the vblank clock (gfx_present.c), so with the tick
@@ -217,10 +233,10 @@ static void present_main(void *arg) {
         }
         wait_until(target);
         uint64_t t1 = kern_now_ns();
-        uint64_t pid = vk_lat_present_start(j.frame);   // Reflex: the game frame's present carries its id
+        uint64_t pid = vk_rfx_present_start(j.frame);   // Reflex: the game frame's present carries its id
         if (!pid) pid = vk_present_game_id(j.frame);   // (or the vblank phase's measure does)
-        vk_present_flip_id(pid);
-        vk_lat_present_end(pid);
+        vk_lat_flip(j.at, nf <= 1, 1, vk_present_flip_id(pid));   // MKW_LATENCY: the game's own picture
+        vk_rfx_present_end(pid);
         // MKW_TRACE=present: one line per present: the host present's interval, the interval of the game's present
         // calls (when the host present went out before back-edge pacing), the wait and how far past its target it went;
         // with frame generation, the game's frame and how many were shown before it
@@ -255,7 +271,7 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     vk_exec_present_note(frame);   // before vk_exec_frame_log, which resets the frame's draw counts
     vk_tmp_present(frame);         // the temporal upscalers' frame boundary (vk_temporal.c)
     if (t) vk_tmp_present_size(t->d.width, t->d.height);
-    vk_lat_submitted(frame);       // Reflex: the frame's work is recorded (vk_latency.c)
+    vk_rfx_submitted(frame);       // Reflex: the frame's work is recorded (vk_reflex_frame.c)
     vk_exec_frame_log(t, frame);
     vk_mem_census(frame);
     if (vk_dump_armed) vk_dump_present(frame);

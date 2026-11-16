@@ -1,5 +1,7 @@
 # tools/build
 
+Shortcuts for these flows: [`make help`](../../Makefile) at the repo root.
+
 | Script | What it does | Usage |
 |---|---|---|
 | `archive.py` | Replaces a static archive from Ninja's response file; the Windows command line cannot hold all 281 objects of the generated `main` module | called by `build.py`; `python tools/build/archive.py LLVM_AR OUT.a OUT.a.rsp` |

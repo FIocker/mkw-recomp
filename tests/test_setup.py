@@ -140,8 +140,22 @@ def test_clean_removes_old(tmp_path: Path, name: str) -> None:
     old = game / name
     old.mkdir() if name == "setup.old" else old.write_text("x")
     (game / "mkw.exe").write_text("keep")
-    update.clean(type("A", (), {"game": game})())
+    update.clean(type("A", (), {"game": game, "previous": None})())
     assert not old.exists() and not (game / "update").exists() and (game / "mkw.exe").exists()
+
+
+def test_clean_keeps_previous(tmp_path: Path) -> None:
+    # with --previous the replaced files go to update-previous/ under their own names, for the Tools page's Undo
+    game = tmp_path / ODD
+    (game / "update-previous").mkdir(parents=True)
+    (game / "update-previous/gone.dll").write_text("older still")
+    (game / "mkw.exe.old").write_text("0.1.10")
+    (game / "lang.old").mkdir()
+    update.clean(type("A", (), {"game": game, "previous": "0.1.10"})())
+    keep = game / "update-previous"
+    assert (keep / "mkw.exe").read_text() == "0.1.10" and (keep / "lang").is_dir()
+    assert (keep / "version").read_text().strip() == "0.1.10" and not (keep / "gone.dll").exists()
+    assert not list(game.glob("*.old"))
 
 
 def test_package_sources_import(tmp_path: Path) -> None:
@@ -399,3 +413,16 @@ def test_lastrun_reads_how_the_last_game_ended() -> None:
     assert lastrun.verdict("[host] FATAL: SIGSEGV at host 0x1\n", "0.1.11", sigs) == "crash"
     assert lastrun.verdict("[host] frame 300\n", "0.1.11", sigs) == ""   # killed or power off: nothing to say
     assert (ROOT / "tools/github/signatures.toml").is_file()
+
+
+@pytest.mark.parametrize("text", ['{"meta": {', "{}"])
+def test_broken_spec_not_reused(tmp_path: Path, text: str) -> None:
+    """A spec the decoder rejects is built again, not reused by every later setup (issue #325)."""
+    import shaderstep  # noqa: PLC0415
+
+    broken = tmp_path / "instructions.json"
+    broken.write_text(text)
+    assert not shaderstep.spec_loads(broken)
+    good = ROOT / "build/sm86/instructions.json"  # built on this machine, never in the repo
+    if good.is_file():
+        assert shaderstep.spec_loads(good)

@@ -20,7 +20,6 @@ Heavy (all cores, several GB): our runs go through tools/run/job.sh.
 """
 
 import argparse
-import ctypes
 import hashlib
 import json
 import os
@@ -109,21 +108,26 @@ WINDOWS = Target(
 )  # fmt: skip
 
 
-def mem_total_gb() -> float:
-    if os.name == "nt":
-        class MemoryStatus(ctypes.Structure):
-            _fields_ = [
-                ("length", ctypes.c_uint32),
-                ("load", ctypes.c_uint32),
-                ("total", ctypes.c_uint64),
-                ("available", ctypes.c_uint64),
-                ("rest", ctypes.c_uint64 * 5),
-            ]
+def windows_memory_gb() -> tuple[float, float]:
+    """Windows' total and available physical memory in GiB (GlobalMemoryStatusEx, MEMORYSTATUSEX); OSError if the
+    call fails. Shared with tools/prepare/machine.py mem_available_gb."""
+    import ctypes
 
-        status = MemoryStatus(length=ctypes.sizeof(MemoryStatus))
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return status.total / 1024**3
-        raise OSError("GlobalMemoryStatusEx failed")
+    class Status(ctypes.Structure):  # MEMORYSTATUSEX
+        _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32), ("total", ctypes.c_uint64),
+                    ("avail", ctypes.c_uint64), ("rest", ctypes.c_uint64 * 5)]  # fmt: skip
+
+    st = Status(length=ctypes.sizeof(Status))
+    if not ctypes.WinDLL("kernel32", use_last_error=True).GlobalMemoryStatusEx(ctypes.byref(st)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return st.total / 2**30, st.avail / 2**30
+
+
+def mem_total_gb() -> float:
+    """The machine's memory in GiB, for the job counts (build.py --job-mem-gb, prepare.py fit). Windows has no
+    /proc/meminfo."""
+    if os.name == "nt":
+        return windows_memory_gb()[0]
     with open("/proc/meminfo") as f:
         for line in f:
             if line.startswith("MemTotal:"):
