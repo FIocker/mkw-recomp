@@ -76,6 +76,39 @@ static PlatCond fl_cv = PLAT_COND_INIT;
 static FlipJob fl_q[4];
 static int fl_head, fl_n, fl_images, fl_thread;   // fl_images: blitted images not flipped yet
 
+typedef struct { uint64_t first, step, previous; int clock; } FlipPace;
+
+// The first call keeps the clock's old behavior because ready_slack waits at that exact time. Later pictures snap the
+// requested timestamp to the nearest predicted call: at 119.88 Hz, several hundred microseconds of live phase noise
+// at the half-refresh boundary must not ceil every later picture a whole vblank late.
+static uint64_t flip_pace_clock(uint64_t t, int first) {
+    if (first) return vk_present_flip_time(t);
+    double hz = vk_present_refresh_hz();
+    if (hz <= 0) return 0;
+    uint64_t half = (uint64_t)(5e8 / hz + 0.5);
+    return vk_present_flip_time(t > half ? t - half : 0);
+}
+
+// The requested step, not one refresh, separates the pictures of one game frame. Each slot is placed from the same
+// start so fractional steps can alternate refresh gaps. If a slot is late or already used, advance to a future slot
+// so that mailbox does not replace a queued picture before its vblank.
+static uint64_t flip_pace_next(FlipPace *p, int k, uint64_t now, int first) {
+    uint64_t ideal = p->first + (uint64_t)k * p->step;
+    if (!p->clock) return ideal;
+    uint64_t at = flip_pace_clock(first && ideal < now ? now : ideal, first);
+    if (at && !first && (at < now || at <= p->previous)) {
+        uint64_t earliest = p->previous + 1;
+        at = vk_present_flip_time(earliest < now ? now : earliest);
+    }
+    if (!at) {   // the vblank clock is not ready, or the swapchain was renewed during the job
+        p->clock = 0;
+        return ideal;
+    }
+    if (first) p->first = at;
+    p->previous = at;
+    return at;
+}
+
 static void trace_present(uint64_t frame, uint64_t t1, uint64_t t0, uint64_t target, uint64_t queued, int made) {
     static uint64_t last, last_queued;
     // MKW_TRACE=present: one line per present: the host present's interval, the interval of the game's present
@@ -98,27 +131,21 @@ static void flip_main(void *arg) {
         FlipJob f = fl_q[fl_head];
         plat_mutex_unlock(&fl_m);
         uint64_t t0 = kern_now_ns();
-        // On the vblank clock (gfx_present.c, from the presents' display times), each flip half a refresh before its
-        // own vblank, one vblank after the other: placed one step apart by the clock alone, the made frame and the
-        // game's fell into one refresh now and then (one dropped by the mailbox: 493 of 5128, pl-dg 15/11/2026).
-        // The first at the display time (or now, when that has passed); without a vblank clock, one step apart.
+        // On the vblank clock (gfx_present.c, from the presents' display times), each flip is half a refresh before
+        // the first vblank that can carry its requested-step target. One refresh per flip was twice too fast for
+        // 60 -> 120 on a 240 Hz display and also queued a game frame's pictures back-to-back on 119.88 Hz.
         static int on_clock = -1;
         if (on_clock < 0) on_clock = !(cfg_get("MKW_FG_VBLANK") && !strcmp(cfg_get("MKW_FG_VBLANK"), "0"));
-        uint64_t at = on_clock ? vk_present_flip_time(f.first > t0 ? f.first : t0) : 0;
+        FlipPace pace = {f.first, f.step, 0, on_clock};
+        uint64_t at = flip_pace_next(&pace, 0, t0, 1);
         // The first flip's wait is ready_slack's (it also measures MKW_LOW_LATENCY's slack), so the late test below is
         // for the flips after it: after that wait `at` has always just passed, and tested there it moved every first
         // made frame a refresh late (19 % of flips two refreshes apart, the game at 50 fps instead of 60 with 2x;
         // merged-fsr-display75 against old89aa-current-display75 and ab-fg, 16/11/2026).
         frame_jit_slack(f.slot, ready_slack(at ? at : f.first, f.value));   // MKW_LOW_LATENCY (core/boot/frame_jit.c)
         for (int k = 1; k < f.nf; k++) {
-            if (at) {
-                uint64_t now = kern_now_ns();
-                if (k > 1 && at < now) at = vk_present_flip_time(now);   // (late: the next refresh)
-                wait_until(at);
-                at = vk_present_flip_time(at + 1);   // the next vblank's
-            } else {
-                wait_until(f.first + (uint64_t)(k - 1) * f.step);
-            }
+            if (k > 1) at = flip_pace_next(&pace, k - 1, kern_now_ns(), 0);
+            wait_until(at);
             uint64_t rfx = vk_rfx_oob_present_start(f.frame);
             uint64_t id = vk_present_flip();
             vk_rfx_oob_present_end(rfx);
@@ -128,8 +155,7 @@ static void flip_main(void *arg) {
             plat_cond_broadcast(&fl_cv);
             plat_mutex_unlock(&fl_m);
         }
-        uint64_t target = at ? at : f.first + (uint64_t)(f.nf - 1) * f.step;
-        if (at && target < kern_now_ns()) target = vk_present_flip_time(kern_now_ns());
+        uint64_t target = flip_pace_next(&pace, f.nf - 1, kern_now_ns(), 0);
         wait_until(target);
         uint64_t t1 = kern_now_ns();
         uint64_t pid = vk_rfx_present_start(f.frame);   // Reflex: the game frame's present carries its id
