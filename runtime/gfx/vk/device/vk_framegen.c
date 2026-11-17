@@ -121,7 +121,7 @@ static struct {
     // frames are flipped on the CPU's schedule, so a generation longer than a step shows them late
     VkQueryPool qp;
     double ts_ns;              // nanoseconds per timestamp tick
-    int q_used[SLOTS];
+    int q_mult[SLOTS];   // total pictures recorded in each slot's timed submission, or zero if unused
     double gpu_sum, gpu_max;
     unsigned gpu_n, gpu_over;  // over: longer than the step between the shown frames
 } F;
@@ -576,8 +576,12 @@ static void hud_pass(VkCommandBuffer cb, const Img *fc, const Img *sc, const Img
     mem_barrier(cb);
 }
 
-int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop[4], int made, VkImage out[VK_FG_MAX],
-                 int *ow, int *oh) {
+static int provider_made(int got, int fallback_made);   // defined with the selector for its asset-free test
+
+static int fg_engine(void);
+
+static int fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop[4], int made, int fallback_made,
+                     VkImage out[VK_FG_MAX], int *ow, int *oh) {
     VkCtx *c = vk_ctx();
     if (!F.tried) init(c);
     if (!F.ok) return 0;
@@ -591,7 +595,8 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     if (cy + ch > sh) ch = sh - cy;
     if (cw <= 0 || ch <= 0 || !ensure_images(c, cw, ch)) return 0;
     if (made > VK_FG_MAX - 1) made = VK_FG_MAX - 1;
-    if (!F.have_prev) made = 0;
+    if (fallback_made > VK_FG_MAX - 1) fallback_made = VK_FG_MAX - 1;
+    if (!F.have_prev) made = fallback_made = 0;
     F.hl_last = 0;
     const int cur = F.cur, prev = cur ^ 1;
     const VkPipelineStageFlags2 ALL = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, XF = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
@@ -622,7 +627,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     const int colour[4] = {1, 1, 0, 0}, level[4] = {0, 4, 0, 0};
     // DLSS Frame Generation or FSR 3.1 frame generation (MKW_FG_ENGINE, vk_temporal.c) in the place of the optical flow,
     // from the same game frame's depth, motion vectors and camera; the flow below when they cannot
-    int eng = !strcmp(cfg_value("MKW_FG_ENGINE"), "dlss") ? 1 : !strcmp(cfg_value("MKW_FG_ENGINE"), "fsr3") ? 2 : 0;
+    int eng = fg_engine();
     // MKW_FG_TEST=copy (measuring): the made frames are copies of the game's, so the present cadence is frame
     // generation's with next to no GPU work
     static int copy_test = -1;
@@ -828,6 +833,7 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
                 F.of_prev = current_in, F.of_prev_ok = 1;
             }
         }
+        made = provider_made(got, fallback_made);
         if (got) {
             static int last_eng = -1;
             if (last_eng != eng) last_eng = eng, rt_log("vk: frame generation by %s", eng == 1 ? "DLSS Frame Generation" : "FSR 3.1");
@@ -853,6 +859,13 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
             F.have_prev = 1;
             F.cur = prev;
             return made + 1;
+        }
+        // A provider's failure keeps the existing native fallback. The provider cap must not also cap that path.
+        if (made) {
+            static int told;
+            if (!told++)
+                rt_log("vk: %s made no frame; the native flow falls back to %dx",
+                       eng == 1 ? "DLSS Frame Generation" : "FSR 3.1", made + 1);
         }
     }
     // the luma levels the flow searches: this frame's, and the last frame's when it went to an engine (none made then)
@@ -888,6 +901,11 @@ int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop
     return made + 1;
 }
 
+int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop[4], int made, VkImage out[VK_FG_MAX],
+                 int *ow, int *oh) {
+    return fg_record(cb, src, sw, sh, crop, made, made, out, ow, oh);
+}
+
 // The frames per game frame the setting asks for now: 0 off (also under the turbo, whose frames are dropped anyway,
 // and while a full-screen movie plays: it goes at the game's own 30 or 60 and a made frame between two of its pictures
 // only repeats or smears them; vis3, 15/11/2026: "duplicado cuando no hace falta"), else 1..VK_FG_MAX, at most what
@@ -911,20 +929,44 @@ static int fits(int m) {
     return k >= 0.97 && fabs(k - round(k)) < 0.03 * round(k);
 }
 
+// A partial provider result remains the result: vendor and native frames have different temporal positions. Only a
+// provider that made none retains the existing native-flow fallback at its full requested factor.
+static int provider_made(int got, int fallback_made) { return got > 0 ? got : fallback_made; }
+
 static int vrr(void) { return cfg_bool("MKW_VRR"); }
 
-static int mult_now(void) {
-    // Diagnostic same-run comparison: A presents source frames alone, B includes the selected generation engine.
-    // The simulation stays at the configured rate; framegen counters never stand in for base-frame throughput.
-    static int bench = -1;
-    if (bench < 0) bench = rt_knob("FG_BENCH", "1");
-    if (!RT_KNOB_ON(bench)) return 0;
-    const char *v = cfg_value("MKW_FRAMEGEN");
-    if (!strcmp(v, "off") || turbo_speed() > 1 || ov_movie_playing()) return 0;
-    // MKW_FG_AB=ab (measuring): frame generation off in the MKW_AB blocks A, on in B, within one race
-    static int ab = -1;
-    if (ab < 0) ab = cfg_get("MKW_FG_AB") && !strcmp(cfg_get("MKW_FG_AB"), "ab");
-    if (ab && !rt_ab()) return 0;
+static int fg_engine(void) {
+    const char *v = cfg_value("MKW_FG_ENGINE");
+    return !strcmp(v, "dlss") ? 1 : !strcmp(v, "fsr3") ? 2 : 0;
+}
+
+// The selected provider's total pictures per game frame (generated + source). DLSS's maximum is a device capability.
+// FSR 3.1's frame-generation API returns one generated picture. If its later evaluation fails, fg_record runs the native
+// path with the full factor from mult_choice's fallback.
+static int provider_mult(void) {
+    int eng = fg_engine();
+    // The vendors' frame generation consumes the temporal engine's depth and motion vectors across vendors. Without
+    // any temporal engine, the native flow keeps the requested refresh-fitted factor.
+    if (vk_tmp_engine() == VK_TMP_OFF) return VK_FG_MAX;
+    // FSR's frame-generation API has a fixed one-generated-frame limit. Do not load its DLLs from this selector: it runs
+    // on the menu thread as well. An unavailable provider returns no picture at evaluation and fg_record falls back to
+    // the full native factor.
+    if (eng == 2) return 2;
+    if (eng == 1) {
+        int generated = vk_tmp_ngx_fg_max();
+        if (generated >= VK_FG_MAX - 1) return VK_FG_MAX;
+        if (generated > 0) return generated + 1;
+    }
+    return VK_FG_MAX;
+}
+
+// Choose from at most max_mult pictures before testing refresh fit. Auto must do this rather than choosing a native
+// factor first and clamping it afterwards: a provider cap can turn an evenly fitting candidate into judder.
+static int choose_mult(const char *v, int max_mult) {
+    int room = vk_present_ahead_max();
+    if (max_mult > room) max_mult = room;
+    if (max_mult > VK_FG_MAX) max_mult = VK_FG_MAX;
+    if (max_mult < 1) max_mult = 1;
     int m;
     if (!strcmp(v, "120")) {
         // Target 120 shown fps without speeding up the game: 60 x2 or 30 x4. Unlike Auto this does not ask a
@@ -936,11 +978,10 @@ static int mult_now(void) {
         int refresh_room = hz > 0 ? (int)(hz * iv / 60.0 + 0.03) : m;
         if (m > refresh_room) m = refresh_room;
     } else if (!strcmp(v, "auto") && !vrr()) {
-        // the most frames that split the refreshes evenly; none (a 75 Hz screen: no game rate fits) shows the game's
-        // own frames. Within what the swapchain has room for.
-        int room = vk_present_ahead_max();
+        // The most pictures that split the refreshes evenly within the selected provider's limit. If none fit,
+        // show the game's own frames rather than silently replacing an even native candidate with an uneven one.
         m = 1;
-        for (int k = VK_FG_MAX < room ? VK_FG_MAX : room; k >= 2 && m == 1; k--)
+        for (int k = max_mult; k >= 2 && m == 1; k--)
             if (fits(k)) m = k;
         return m;
     } else if (!strcmp(v, "auto")) {   // a variable refresh screen shows any rate evenly: as many as fit in time
@@ -956,11 +997,29 @@ static int mult_now(void) {
     } else {
         m = atoi(v);
     }
-    int room = vk_present_ahead_max();
-    if (m > room) m = room;
-    if (m > VK_FG_MAX) m = VK_FG_MAX;
+    if (m > max_mult) m = max_mult;
     return m < 1 ? 1 : m;
 }
+
+static int mult_choice(int *fallback) {
+    // Diagnostic same-run comparison: A presents source frames alone, B includes the selected generation engine.
+    // The simulation stays at the configured rate; framegen counters never stand in for base-frame throughput.
+    static int bench = -1;
+    if (bench < 0) bench = rt_knob("FG_BENCH", "1");
+    *fallback = 0;
+    if (!RT_KNOB_ON(bench)) return 0;
+    const char *v = cfg_value("MKW_FRAMEGEN");
+    if (!strcmp(v, "off") || turbo_speed() > 1 || ov_movie_playing()) return 0;
+    // MKW_FG_AB=ab (measuring): frame generation off in the MKW_AB blocks A, on in B, within one race
+    static int ab = -1;
+    if (ab < 0) ab = cfg_get("MKW_FG_AB") && !strcmp(cfg_get("MKW_FG_AB"), "ab");
+    if (ab && !rt_ab()) return 0;
+    int cap = provider_mult();
+    *fallback = choose_mult(v, VK_FG_MAX);
+    return cap == VK_FG_MAX ? *fallback : choose_mult(v, cap);
+}
+
+static int mult_now(void) { int fallback; return mult_choice(&fallback); }
 
 int vk_fg_wanted(void) { return strcmp(cfg_value("MKW_FRAMEGEN"), "off") != 0; }
 
@@ -1291,7 +1350,8 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
         F.interval = F.interval ? (F.interval * 7 + d) / 8 : d;
     }
     F.last_at = at;
-    int m = mult_now();
+    int fallback_m;
+    int m = mult_choice(&fallback_m);
     if (m < 2) {   // off, or auto with no room between two refreshes: the caller presents the game's picture
         bypass_order();
         if (F.logged_mult >= 2) rt_log("vk: frame generation paused (%s)", ov_movie_playing() ? "a movie plays" : "off");
@@ -1326,16 +1386,17 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
         return 0;
     }
     VkCommandBuffer cb = F.cb[slot];
-    if (F.qp && F.q_used[slot]) {   // the last use of this slot: its fence was waited for above
+    int pictures = F.q_mult[slot];
+    if (F.qp && pictures) {   // the last use of this slot: its fence was waited for above
         uint64_t t[2];
         if (vkGetQueryPoolResults(c->device, F.qp, 2 * slot, 2, sizeof t, t, sizeof t[0], VK_QUERY_RESULT_64_BIT) ==
             VK_SUCCESS && t[1] > t[0]) {
             double ms = (double)(t[1] - t[0]) * F.ts_ns / 1e6;
             F.gpu_sum += ms, F.gpu_n++;
             if (ms > F.gpu_max) F.gpu_max = ms;
-            if (F.interval && m > 1 && ms * 1e6 > (double)F.interval / m) F.gpu_over++;
+            if (F.interval && pictures > 1 && ms * 1e6 > (double)F.interval / pictures) F.gpu_over++;
         }
-        F.q_used[slot] = 0;
+        F.q_mult[slot] = 0;
     }
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -1371,10 +1432,13 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
             setocc(cb, &pp);
         }
     }
-    int n = vk_fg_record(cb, src, sw, sh, crop, m - 1, out, w, h);
+    int n = fg_record(cb, src, sw, sh, crop, m - 1, fallback_m - 1, out, w, h);
     F.rec_x = VK_NULL_HANDLE;
     if (xcb) vkEndCommandBuffer(xcb);
-    if (F.qp) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, F.qp, 2 * slot + 1), F.q_used[slot] = n > 0;
+    if (F.qp) {
+        vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, F.qp, 2 * slot + 1);
+        F.q_mult[slot] = n;
+    }
     int dump = n && dump_record(cb, out, n, *w, *h, F.compare_native);
     vkEndCommandBuffer(cb);
     if (!n) {   // recorded nothing; preserve ordering when normal graphics resumes without a copy submission
@@ -1433,12 +1497,12 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
     // turbo frame generation is off)
     *step = (uint64_t)(game_ticks() * (1e9 / 60.0)) / (uint64_t)n;
     F.frames++, F.made_total += (uint64_t)(n - 1);
-    if (m != F.logged_mult || F.frames % (cfg_get("MKW_FG_LOG_EVERY") && atoll(cfg_get("MKW_FG_LOG_EVERY")) > 0 ? (uint64_t)atoll(cfg_get("MKW_FG_LOG_EVERY")) : 1800) == 0) {   // ~1 min at 30 fps
-        F.logged_mult = m;
+    if (n != F.logged_mult || F.frames % (cfg_get("MKW_FG_LOG_EVERY") && atoll(cfg_get("MKW_FG_LOG_EVERY")) > 0 ? (uint64_t)atoll(cfg_get("MKW_FG_LOG_EVERY")) : 1800) == 0) {   // ~1 min at 30 fps
+        F.logged_mult = n;
         rt_log("vk: frame generation %dx: game frame every %.1f ms, %llu frames made over %llu game frames; GPU per game "
-               "frame %.2f ms mean, %.2f max, %u longer than a step (%.1f ms); without the HUD %llu, HUD seen %llu", m,
+               "frame %.2f ms mean, %.2f max, %u longer than a step (%.1f ms); without the HUD %llu, HUD seen %llu", n,
                F.interval / 1e6, (unsigned long long)F.made_total, (unsigned long long)F.frames,
-               F.gpu_n ? F.gpu_sum / F.gpu_n : 0.0, F.gpu_max, F.gpu_over, m ? F.interval / 1e6 / m : 0.0,
+               F.gpu_n ? F.gpu_sum / F.gpu_n : 0.0, F.gpu_max, F.gpu_over, n ? F.interval / 1e6 / n : 0.0,
                (unsigned long long)F.hl_given, (unsigned long long)F.hl_missing);
         if (F.hud_frames)
             rt_log("vk: frame generation: the game's HUD put over the made frames of %llu game frames",

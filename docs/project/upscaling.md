@@ -13,8 +13,8 @@ run them; the game's own picture and pacing stay).
 | `temporal_sharpness` | `0`..`100` | FSR 3.1's sharpening. Live |
 | `cas` | `off`, `on` | AMD's contrast adaptive sharpening (CAS) of the race after DLSS, DLAA or FSR 3.1, before the HUD. Needs `temporal` on. Live |
 | `cas_sharpness` | `0`..`100` | CAS's strength. Live |
-| `framegen` | `off`, `auto`, `2`, `3`, `4` | Frames shown per game frame (the port's existing setting) |
-| `fg_engine` | `flow`, `dlss`, `fsr3` | Who makes those frames: the port's optical flow, DLSS Frame Generation (RTX 40/50; `nvngx_dlssg.dll` next to `mkw.exe`; up to 4x on RTX 50) or FSR 3.1 frame generation (2x; `amd_fidelityfx_framegeneration_vk.dll`). DLSS-G and FSR FG need `temporal` on: they use its depth and motion vectors. Live, but DLSS-G at the next start when the game started without DLSS |
+| `framegen` | `off`, `auto`, `2`, `3`, `4`, `120` | Frames shown per game frame, or a 120 fps display target. The target and Auto respect the display, swapchain and selected engine's limit |
+| `fg_engine` | `flow`, `dlss`, `fsr3` | Who makes those frames: the port's optical flow, DLSS Frame Generation (RTX 40/50; `nvngx_dlssg.dll` next to `mkw.exe`; up to 4x on RTX 50) or FSR 3.1 frame generation (one generated frame, 2x; `amd_fidelityfx_framegeneration_vk.dll`). DLSS-G and FSR FG need `temporal` on: they use its depth and motion vectors. Live, but DLSS-G at the next start when the game started without DLSS |
 | `reflex` | `off`, `on`, `boost` | NVIDIA Reflex through `VK_NV_low_latency2`. Live once the game started with it on; from off, at the next start |
 
 With `resolution = 2160` (or a window taller than 1440 lines with `temporal` on), the upscaler writes the full output
