@@ -1,13 +1,17 @@
 # tools/ffx
 
-`build.py` builds the production StillTie correction as one game-field SPIR-V
+`builder/build.py` builds the production StillTie correction as one game-field SPIR-V
 shader for the official FidelityFX provider. It starts from pinned MIT
 FidelityFX SDK commit `7539ae8b6568ad29ed78a753404351daf3b5cca7`, applies
 [`patches/fsr3-1-6-vulkan.patch`](patches/fsr3-1-6-vulkan.patch), compiles with
 pinned DXC 1.9.2609.5, and runs `spirv-val`.
 
-The optional diagnostic provider's CMake, API glue and shader generation sources live in
-[`build_support/`](build_support/README.md); the tracked SDK changes live in [`patches/`](patches/README.md).
+| Folder | What it holds |
+|---|---|
+| [builder/](builder/README.md) | `build.py`: the production shader, and with `--provider` the diagnostic provider |
+| [patches/](patches/README.md) | The tracked changes to the pinned SDK |
+| [provider/](provider/README.md) | The optional diagnostic provider's CMake and API glue |
+| [provider_shaders/](provider_shaders/README.md) | The diagnostic provider's shader compiler and lookup generator |
 
 The production shader uses the official provider layout:
 
@@ -23,7 +27,7 @@ The builder also requires the reviewed output SHA-256
 an unreviewed byte change fails before anything is packaged.
 
 ```powershell
-uv run tools/ffx/build.py
+uv run tools/ffx/builder/build.py
 ```
 
 The default build writes:
@@ -54,7 +58,7 @@ not a copyleft source-distribution requirement.
 The full diagnostic provider remains available explicitly:
 
 ```powershell
-uv run tools/ffx/build.py --provider
+uv run tools/ffx/builder/build.py --provider
 ```
 
 That mode compiles all 25 SDR/HDR frame-interpolation and optical-flow shaders

@@ -31,6 +31,9 @@ int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly);
 // input, the gamepad when one is connected. Any thread.
 enum { INPUT_DEVICE_KEYBOARD = 1, INPUT_DEVICE_PAD = 2 };
 int input_last_device(void);
+// The open gamepad's default left stick dead zone in % when MKW_STICK_DEADZONE is unset (an Xbox pad's is Microsoft's,
+// not the 8 % of the settings table); -1 without a gamepad. Any thread.
+double input_stick_deadzone_default(void);
 // The gamepad layout in effect (PAD_LAYOUT_*, input_map.h; MKW_PAD_LAYOUT, live); -1 without a gamepad. Any thread.
 int input_pad_layout(void);
 // The label on a face button of the open gamepad (input_map.h PAD_SOUTH..PAD_NORTH, as SDL reports it); PAD_LABEL_NONE for another
@@ -68,7 +71,8 @@ uint16_t rumble_motor(float a, float curve, float strength);
 int input_rumble_triggers_enabled(void);
 
 // Motion (MKW_MOTION=0 turns it off, live). input_motion_start starts the sensor thread once: every 4 ms it reads the
-// gamepad's gyro and accelerometer (when it has them) and feeds motion_global(). Callable from any thread.
+// gamepad's gyro and accelerometer (when it has them, else a DSU server's with MKW_DSU=1, dsu.h) and feeds each
+// player's motion_player(). Callable from any thread.
 void input_motion_start(void);
 // MKW_MOTION is not "0" (a live setting: read again when cfg_version changes). Off: the sensor reads at rest.
 int input_motion_enabled(void);

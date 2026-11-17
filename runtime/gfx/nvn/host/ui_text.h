@@ -89,6 +89,7 @@ typedef enum {
     UI_MENU_MOUSE_SENS, UI_MENU_MOUSE_SENS_DESC,
     UI_MENU_STICK_DEADZONE, UI_MENU_STICK_DEADZONE_DESC,
     UI_MENU_SWITCH2, UI_MENU_SWITCH2_DESC,
+    UI_MENU_DSU, UI_MENU_DSU_DESC,   // Cemuhook / DSU motion (input/dsu.c)
     UI_MENU_BUTTON_ICONS, UI_MENU_BUTTON_ICONS_DESC, UI_MENU_ICONS_NINTENDO, UI_MENU_ICONS_XBOX,
     UI_MENU_ICONS_PLAYSTATION, UI_MENU_ICONS_KEYBOARD, UI_MENU_ICONS_IN_USE,   // "in use: %s"
 
@@ -249,7 +250,16 @@ typedef enum {
     // CONFIRM "... %s ..." (the name)
     UI_LAUNCH_PLAYERS, UI_PLAYER_NOTE, UI_PLAYER_NAME_HINT, UI_PLAYER_CHOOSE, UI_PLAYER_CHOSEN,
     UI_PLAYER_NEW, UI_PLAYER_REMOVE, UI_PLAYER_CONFIRM, UI_PLAYER_FAILED,
-    UI_MENU_LAST_ID = UI_PLAYER_FAILED,
+    UI_SETUP_ERR_SPACE,   // "... %s ...": what the setup needs and what is free, where (tools/prepare/gamecopy.py)
+    // General tab: the start screen at start (launcher.cpp console_start), its choices after Automatic
+    UI_MENU_START_SCREEN, UI_MENU_START_SCREEN_DESC, UI_MENU_START_ALWAYS, UI_MENU_START_SKIP,
+    // the game files the setup left are not where it left them (launcher.cpp files_gone): the state line, and under it
+    // HELP "... %s ..." (where they were)
+    UI_LAUNCH_FILES_GONE, UI_LAUNCH_FILES_GONE_HELP,
+    // the setup's copies found in the usual places (launcher.cpp found_copies): the list's title, the line while it
+    // looks, and the kind of a loose copy
+    UI_LAUNCH_FOUND, UI_LAUNCH_FOUND_SEARCHING, UI_LAUNCH_FOUND_FOLDER,
+    UI_MENU_LAST_ID = UI_LAUNCH_FOUND_FOLDER,
     UI_TEXT_COUNT
 } UiTextId;
 

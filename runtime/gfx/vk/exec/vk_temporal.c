@@ -16,7 +16,7 @@
 //
 // Motion vectors: the scene's camera block (vertex c4, 0x980 bytes) holds this frame's and the previous frame's
 // matrices: rows 0-2 view, 3-6 view-projection, 7-10 projection, 11-13 inverse view, 14 near and far, 18 the render
-// size, and rows 21-31 the previous frame's view, view-projection and projection. shaders/tmp_mv.comp reprojects every
+// size, and rows 21-31 the previous frame's view, view-projection and projection. shaders/temporal/tmp_mv.comp reprojects every
 // depth pixel through prev = VP_prev * inverse(VP_this) (built here in double precision). The camera of the player's
 // kart moves with it: MKW_TEMPORAL_KART (default on) keeps the pixels of the kart (close to the camera, bottom middle)
 // still instead of moving them like the ground.
@@ -380,7 +380,7 @@ typedef struct {
     _Bool other_sinks_off;
 } NgxCommonInfo;
 // The NVIDIA App's DLSS Frame Generation override: NGX then loads the App's model, whose made frames come out as an
-// even blend of the two game frames (docs/upscaling.md). NGX says so in its log, which is always listened to (no files).
+// even blend of the two game frames (docs/project/upscaling.md). NGX says so in its log, which is always listened to (no files).
 static volatile int ngx_fg_override, ngx_log_print;
 static void ngx_log(const char *msg, int level, int feature) {
     if (strstr(msg, "Feature dlssg override enabled")) ngx_fg_override = 1;

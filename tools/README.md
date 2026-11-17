@@ -11,7 +11,7 @@ default, or `MKW_GAME=<dir>`, with `exefs/` and `romfs/` inside) and write to `b
 | [docs/](docs/README.md) | Docs checks at every commit and the README's generated progress bars |
 | [ffx/](ffx/README.md) | Production StillTie game-field SPIR-V build and optional diagnostic FSR 3.1.6 provider |
 | [git/](git/README.md) | Pre-commit hook that keeps generated code and game files out of the repo |
-| [i18n/](i18n/README.md) | The menu's text catalogs: from `i18n/*.po` to the C the runtime compiles |
+| [i18n/](i18n/README.md) | The menu's text catalogs: from `i18n/ui/*.po` to the C the runtime compiles |
 | [github/](github/README.md) | Issue moderation: release and GPU labels, missing logs, known errors, replies that close |
 | [gpu/](gpu/README.md) | NVN2 functions: which ones the game uses, their address in the driver and object sizes |
 | [imagen/](imagen/README.md) | Flight recorder thumbnails, contact sheets and image comparison |

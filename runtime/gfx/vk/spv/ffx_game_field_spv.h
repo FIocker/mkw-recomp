@@ -24,7 +24,7 @@
 // source: https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
 // commit: 7539ae8b6568ad29ed78a753404351daf3b5cca7
 // shader: ffx_frameinterpolation_game_motion_vector_field_pass.hlsl
-// builder: uv run tools/ffx/build.py
+// builder: uv run tools/ffx/builder/build.py
 // spv sha256: 1d7e3e8d3b7046764a2a9f98f5e04147befaf4b0ea4f9fa017242f9824af5c6e
 // spv bytes: 15292
 // official bindings: UAV 128/129, CB 256, SRV 0..4, sampler 320

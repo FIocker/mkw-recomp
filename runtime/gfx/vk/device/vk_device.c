@@ -503,6 +503,7 @@ static int create_device(void) {
     free(c);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateDevice failed (%d)", (int)r); return 0; }
     vk_lat_device(g_vk.device, g_vk.has_present_wait);   // MKW_LATENCY's waiter (vk_latency.c)
+    vk_pstate_init(g_vk.phys);
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
     g_vk.fg_queue = g_vk.gfx_queue;
     if (gq == 2) vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 1, &g_vk.fg_queue);
