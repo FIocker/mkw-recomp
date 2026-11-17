@@ -16,5 +16,5 @@ uint64_t vk_rfx_present_start(uint64_t id);   // present thread: the VkPresentId
 void vk_rfx_present_end(uint64_t id);
 uint64_t vk_rfx_oob_present_start(uint64_t id);   // before a generated present: marker id, or 0 if inactive
 void vk_rfx_oob_present_end(uint64_t id);     // immediately after it
-void vk_rfx_shutdown(void);
+void vk_rfx_shutdown(void);   // returns only after admitted driver calls leave; call before vkDestroyDevice
 uint64_t vk_be_next_frame_id(void);     // vk_backend.c: the id of the frame the game thread is about to simulate

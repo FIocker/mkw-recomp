@@ -36,28 +36,32 @@ static PlatMutex lk = PLAT_MUTEX_INIT;
 
 // The calls below come from the game thread (the sleep, which waits up to a frame), the replay and the present and flip
 // threads, without lk (a lock around the sleep would hold every present behind it). vk_rfx_shutdown frees L.r: it first
-// turns new calls away (closing) and waits for those inside to leave (PR 462 review: the flip thread could still mark
-// a present on a freed L.r at exit with Reflex on).
+// turns new calls away (closing) and waits for every admitted call to leave. It must return before vk_device.c destroys
+// the device, because a driver call can otherwise still be inside the driver while Vulkan tears its objects down.
 static int users, closing;
 static int enter(void) {
     __atomic_add_fetch(&users, 1, __ATOMIC_SEQ_CST);
-    if (!__atomic_load_n(&closing, __ATOMIC_SEQ_CST) && L.r) return 1;
+    if (!__atomic_load_n(&closing, __ATOMIC_SEQ_CST) && __atomic_load_n(&L.r, __ATOMIC_ACQUIRE)) return 1;
     __atomic_sub_fetch(&users, 1, __ATOMIC_RELEASE);
     return 0;
 }
 static void leave(void) { __atomic_sub_fetch(&users, 1, __ATOMIC_RELEASE); }
 
 void vk_rfx_init(uint32_t spec_version) {
+    // Vulkan can be initialized again after vk_shutdown. No calls can be admitted while this sets up a new L.r.
+    __atomic_store_n(&closing, 1, __ATOMIC_SEQ_CST);
     const VkCtx *c = vk_ctx();
     if (!c || !spec_version) {
         if (c && c->low_latency2_have)   // the device has it, left out with Reflex off at start (vk_device.c)
             rt_log("reflex: off at start: VK_NV_low_latency2 not enabled (Reflex on in the menu applies after a restart)");
         else
             rt_log("reflex: the driver has no VK_NV_low_latency2: NVIDIA Reflex unavailable");
+        __atomic_store_n(&closing, 0, __ATOMIC_SEQ_CST);
         return;
     }
-    L.r = vk_reflex_create(c->device, spec_version);
+    __atomic_store_n(&L.r, vk_reflex_create(c->device, spec_version), __ATOMIC_RELEASE);
     vk_reflex_set_external_lock(gfx_swapchain_lock, gfx_swapchain_unlock);
+    __atomic_store_n(&closing, 0, __ATOMIC_SEQ_CST);
     rt_log("reflex: VK_NV_low_latency2 revision %u %s", spec_version, L.r ? "ready" : "could not be set up");
 }
 
@@ -125,7 +129,9 @@ void vk_rfx_swapchain_destroying(VkSwapchainKHR sc) {
     leave();
 }
 
-static int on(void) { return L.r && L.sc && L.mode != VK_REFLEX_OFF; }
+static int on(void) {
+    return __atomic_load_n(&L.r, __ATOMIC_ACQUIRE) && L.sc && L.mode != VK_REFLEX_OFF;
+}
 
 void vk_rfx_frame_start(uint64_t id) {
     if (!enter()) return;
@@ -185,16 +191,28 @@ uint64_t vk_rfx_oob_present_start(uint64_t id) { return mark_if_on(VK_LATENCY_MA
 void vk_rfx_oob_present_end(uint64_t id) { (void)mark_if_on(VK_LATENCY_MARKER_OUT_OF_BAND_PRESENT_END_NV, id); }
 
 void vk_rfx_shutdown(void) {
-    if (!L.r) return;
+    VkReflex *reflex = __atomic_load_n(&L.r, __ATOMIC_ACQUIRE);
+    if (!reflex) return;
     __atomic_store_n(&closing, 1, __ATOMIC_SEQ_CST);
-    // the calls inside leave within a Reflex sleep's timeout; a thread stuck longer (a lost device) is not waited for
-    uint64_t until = plat_now_ns() + 500000000ull;
-    while (__atomic_load_n(&users, __ATOMIC_ACQUIRE) && plat_now_ns() < until) plat_sleep_ms(1);
-    if (__atomic_load_n(&users, __ATOMIC_ACQUIRE)) {
-        rt_log("reflex: a call still inside at shutdown: VK_NV_low_latency2 state left to the device's end");
-        return;
+
+    // Destroying the device while a driver entry point is still running is invalid even when that call is stuck. Wait
+    // without a deadline instead. The regular sleep gives up its virtual core and times out; a device-lost call also
+    // returns, so this blocks only on the pathological driver failure where continuing to teardown would be unsafe.
+    uint64_t next_report = plat_now_ns() + 500000000ull;
+    while (__atomic_load_n(&users, __ATOMIC_ACQUIRE)) {
+        uint64_t now = plat_now_ns();
+        if (now >= next_report) {
+            rt_log("reflex: waiting for %d admitted call(s) before device destruction",
+                   __atomic_load_n(&users, __ATOMIC_ACQUIRE));
+            next_report = now + 1000000000ull;
+        }
+        plat_sleep_ms(1);
     }
-    if (L.sc) vk_reflex_swapchain_detach(L.r, L.sc), L.sc = NULL;
-    vk_reflex_destroy(L.r);
+    if (L.sc) {
+        vk_reflex_swapchain_detach(reflex, L.sc);
+        L.sc = NULL;
+        L.sc_handle = VK_NULL_HANDLE;
+    }
+    vk_reflex_destroy(reflex);
     __atomic_store_n(&L.r, NULL, __ATOMIC_RELEASE);
 }
