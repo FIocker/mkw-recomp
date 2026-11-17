@@ -158,4 +158,3 @@ def test_step_shorter_than_refresh_does_not_reuse_a_call(scheduler: Path) -> Non
     refresh = round(1_000_000_000 / 120)
     assert calls == sorted(set(calls))
     assert all(b - a >= refresh for a, b in zip(calls, calls[1:]))
-
