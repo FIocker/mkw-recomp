@@ -33,7 +33,7 @@ static int save_ok = 1;                         // the last cfg_save_to wrote (o
 // Every name the runtime reads (and the patch sets in generated/), without the prefix. A file key outside this list is
 // logged as unknown. A new variable goes here too, or its ini key logs a harmless "unknown key" line.
 static const char *const known[] = {
-    "AB", "ANISO", "APP_POOL", "ASPECT", "ASSUME_FOCUS", "ASTC", "ASTC_BC1", "ASTC_BC7", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_CHANNELS", "AUDIO_OFF", "AUDIO_PREFILL_MS",
+    "AB", "ANISO", "APP_POOL", "ASPECT", "ASSUME_FOCUS", "ASTC", "ASTC_BC1", "ASTC_BC7", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_CHANNELS", "AUDIO_OFF", "AUDIO_PREFILL_MS", "AUDIO_SKEW",
     "BACKGROUND_MUTE", "BACKGROUND_WINDOW", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
@@ -41,7 +41,7 @@ static const char *const known[] = {
     "BIND_ZL", "BIND_ZR", "BUTTON_ICONS", "CLASSIC_GP", "CLASSIC_VS", "CORE_DIAG", "CRIT", "CRIT_OUT", "CTL", "DESC_TEMPLATE", "DETAIL_DISTANCE", "DEVICE_PROFILE", "DISCORD", "DISCORD_APP", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_DRAWS", "DUMP_DRAWS_RECT", "DUMP_DRAWS_SKIP", "DSU", "DSU_SERVER", "DSU_SLOT", "DYN_DIFF", "DUMP_LOG",
     "EXEFS", "FEEDBACK", "FG_BIAS", "FG_DUMP", "FG_DUMP_DIR", "FG_LAMBDA", "FG_PROBE", "FIX_C0", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
     "FLIGHT_THUMBS", "FPS", "FRAMEGEN", "FREEZE_IDLE", "GLYPH_DUMP", "FREE_CORES", "FULLSCREEN", "GAME_DIR", "GPL", "GPL_DRAW_BUILD", "GPU",
-    "GPU_CRUMBS", "GPU_CRUMBS_DRAW", "HDR", "HDR_FAKE", "GPU_INDEX", "GPU_MEM_LIMIT", "GPU_NAME", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LAN", "LAN_IP", "LANG", "LATENCY", "LOW_LATENCY",
+    "GPU_CRUMBS", "GPU_CRUMBS_DRAW", "HDR", "HDR_FAKE", "GPU_INDEX", "GPU_MEM_LIMIT", "GPU_NAME", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LAN", "LAN_IP", "LAN_PEERS", "LANG", "LATENCY", "LOW_LATENCY",
     "LOCALE", "MEMORY", "MESH_COMPUTE", "MENU_LANG", "MENU_TEST",
     "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MODS", "MODS_ACK", "MODS_PLAYED", "MOTION",
     "MOUSE_SENS", "PLAYER",   // PLAYER: the launcher's choice (core/base/players.h), no row: Reset all leaves it
@@ -68,7 +68,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"CAS", "display"}, {"CAS_SHARPNESS", "display"}, {"TEMPORAL", "display"}, {"TEMPORAL_QUALITY", "display"}, {"TEMPORAL_SHARPNESS", "display"}, {"TEMPORAL_KART", "display"},
     {"DLSS_PRESET", "display"}, {"FG_ENGINE", "display"}, {"FG_HUD", "display"}, {"REFLEX", "display"},
     {"QUALITY", "graphics"}, {"ANISO", "graphics"}, {"TEX_QUALITY", "graphics"}, {"DETAIL_DISTANCE", "graphics"}, {"SHADOW_SIZE", "graphics"},
-    {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"}, {"LAN", "language"},
+    {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"}, {"LAN", "language"}, {"LAN_PEERS", "language"},
     {"VOLUME", "audio"}, {"AUDIO_CHANNELS", "audio"}, {"BACKGROUND_MUTE", "audio"},
     {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
     {"PAD_LAYOUT", "input"}, {"BUTTON_ICONS", "input"}, {"MOUSE_SENS", "input"}, {"STICK_DEADZONE", "input"}, {"SWITCH2", "input"}, {"INPUT_RECORD", "input"},

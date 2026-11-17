@@ -376,3 +376,4 @@ int probe_fsr_fg(void);                                    // fsr_fg_probe.c: an
 int probe_gpu_clocks(void);                                // clk_probe.c: the GPU clock after idle gaps (MKW_GPU_CLOCKS)
 
 int vk_texpre_encode(void);                                  // vk_texpre.c: --texpre (BC7 of the recorded ASTC textures)
+int vk_pipeline_prewarm_main(void);                          // vk_pipe_pairs.c: --prewarm (setup's warm step, no game)

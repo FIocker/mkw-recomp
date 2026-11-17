@@ -67,6 +67,20 @@ def test_resume_from_moved_folder(tmp_path: Path) -> None:
     assert p.returncode == 1 and f"error moved {gone}" in p.stdout, p.stdout + p.stderr
 
 
+def test_resume_copy_source_deleted(tmp_path: Path) -> None:
+    # issue #501: a copy's original files deleted after the setup; the game folder holds them and is the source now
+    game = tmp_path / ODD / "game"
+    (game / "exefs").mkdir(parents=True)
+    (game / "exefs/main").write_bytes(b"\0")
+    (game / "romfs").mkdir()
+    gone = tmp_path / ODD / "deleted"
+    state = {"version": 1, "source": str(gone), "romfs_mode": "copy", "done": {"romfs": "copy 1.8.0"}}
+    (game / "setup-state.json").write_text(json.dumps(state))
+    p = run_prepare("--game", str(game))
+    assert "error moved" not in p.stdout and "step check" in p.stdout, p.stdout + p.stderr
+    assert f"error nogame {game}" in p.stdout or str(game) in p.stdout.split("step check", 1)[1], p.stdout
+
+
 def test_keys_from_before_kept() -> None:
     # a step done under its key with the source folders (before 0.1.10) is not redone; another key still is
     state = {"done": {"shaders": "/old/exefs /old/romfs t1", "compile": "/old/exefs c1"}}
@@ -255,19 +269,16 @@ assert machine.package_dir(Path(sys.argv[2])) == Path(sys.argv[3])
 def test_warm_uses_launcher_with_selected_installation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     game, runtime = tmp_path / ODD / "game", tmp_path / "launcher"
     calls = []
-    process = SimpleNamespace(terminate=lambda: None, wait=lambda timeout: 0)
 
     def start(argv: list[str], **kwargs: object) -> SimpleNamespace:
         calls.append((argv, kwargs))
-        return process
+        return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(prepare.subprocess, "Popen", start)
-    monkeypatch.setattr(prepare, "WARM_SECONDS", 0)
+    monkeypatch.setattr(prepare.subprocess, "run", start)
     prepare.warm(game, game / "setup-work", runtime)
     argv, kwargs = calls[0]
-    assert argv == [str(runtime / ("mkw.exe" if os.name == "nt" else "mkw"))]
+    assert argv == [str(runtime / ("mkw.exe" if os.name == "nt" else "mkw")), "--prewarm"]
     assert kwargs["env"]["MKW_GAME_DIR"] == str(game)
-    assert kwargs["env"]["MKW_PROFILE_DIR"] == str(game / "setup-work/warm-profile")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="creating directory symlinks requires Windows privileges")
@@ -281,19 +292,17 @@ def test_setup_preserves_short_alias_for_warmup(tmp_path: Path, monkeypatch: pyt
     alias.symlink_to(target, target_is_directory=True)
     runtime, source = tmp_path / "launcher", tmp_path / "dump"
     calls = []
-    process = SimpleNamespace(terminate=lambda: None, wait=lambda timeout: 0)
 
     def start(argv: list[str], **kwargs: object) -> SimpleNamespace:
         calls.append((argv, kwargs))
-        return process
+        return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(prepare, "own_children", lambda: None)
     monkeypatch.setattr(prepare.update, "ca_file", lambda: None)
     monkeypatch.setattr(prepare, "STEPS", ("check", "warm"))
     monkeypatch.setattr(prepare, "check", lambda *args: (source / "exefs", source / "romfs",
                                                        SimpleNamespace(name="test")))
-    monkeypatch.setattr(prepare, "WARM_SECONDS", 0)
-    monkeypatch.setattr(prepare.subprocess, "Popen", start)
+    monkeypatch.setattr(prepare.subprocess, "run", start)
     monkeypatch.setattr(sys, "argv", ["prepare.py", "--game", str(alias), "--runtime", str(runtime),
                                       "--source", str(source)])
     # main opens its setup log on stderr. Restore pytest's capture stream after exercising the real argument path
@@ -306,9 +315,8 @@ def test_setup_preserves_short_alias_for_warmup(tmp_path: Path, monkeypatch: pyt
         if sys.stderr is not original_stderr:
             sys.stderr.close()
     argv, kwargs = calls[0]
-    assert argv == [str(runtime / "mkw")]
+    assert argv == [str(runtime / "mkw"), "--prewarm"]
     assert kwargs["env"]["MKW_GAME_DIR"] == str(alias)
-    assert kwargs["env"]["MKW_PROFILE_DIR"] == str(alias / "setup-work/warm-profile")
 
 
 @pytest.mark.parametrize("driver", ["clang", "lld-link", "zig"])
