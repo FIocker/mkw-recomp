@@ -8,6 +8,21 @@ msgctxt "UI_SWKBD_DEFAULT_NAME"
 msgid "Player"
 msgstr "Xogador"
 
+#. The on-screen number pad the game opens to ask for a number: its confirm key (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_OK"
+msgid "OK"
+msgstr "Aceptar"
+
+#. The on-screen number pad: the wide button under the keys that closes it without a number
+msgctxt "UI_KEYPAD_CANCEL"
+msgid "Cancel"
+msgstr "Cancelar"
+
+#. The on-screen number pad: the key that erases the last digit (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_DELETE"
+msgid "Delete"
+msgstr "Borrar"
+
 msgctxt "UI_MENU_TITLE"
 msgid "Settings"
 msgstr "Configuración"
@@ -359,6 +374,26 @@ msgctxt "UI_MENU_ASPECT_WINDOW"
 msgid "Window"
 msgstr "Xanela"
 
+msgctxt "UI_MENU_HUD_POSITION"
+msgid "HUD position"
+msgstr "Posición do HUD"
+
+msgctxt "UI_MENU_HUD_POSITION_DESC"
+msgid ""
+"On a picture wider or taller than 16:9, keep the race HUD in the middle 16:9 area (the console's "
+"place) or put it at the screen's edges and corners. Takes effect at the next start."
+msgstr ""
+"Nunha imaxe máis ancha ou máis alta ca 16:9, deixa o HUD da carreira na zona 16:9 do centro (onde "
+"está na consola) ou lévao aos bordos e esquinas da pantalla. Aplícase no seguinte inicio."
+
+msgctxt "UI_MENU_HUD_POSITION_16X9"
+msgid "16:9 area"
+msgstr "Zona 16:9"
+
+msgctxt "UI_MENU_HUD_POSITION_EDGES"
+msgid "Screen edges"
+msgstr "Bordos da pantalla"
+
 msgctxt "UI_MENU_PRESENT"
 msgid "Presentation"
 msgstr "Presentación"
@@ -449,6 +484,20 @@ msgstr ""
 msgctxt "UI_MENU_FPS_AUTO"
 msgid "Automatic"
 msgstr "Automático"
+
+msgctxt "UI_MENU_LOGIC_HZ"
+msgid "Logic rate"
+msgstr "Frecuencia da lóxica"
+
+msgctxt "UI_MENU_LOGIC_HZ_DESC"
+msgid ""
+"How many times a second the game updates karts, physics and timers. 60 is the console's rate; "
+"120, 144 or 240 make movement smoother on a high refresh rate screen but need a faster PC. Time "
+"trials and LAN games always run at 60."
+msgstr ""
+"Cantas veces por segundo o xogo actualiza os karts, a física e os cronómetros. 60 é o da consola; "
+"120, 144 ou 240 fan o movemento máis fluído nunha pantalla de alta frecuencia, pero piden un PC "
+"máis rápido. A contrarreloxo e as partidas en LAN van sempre a 60."
 
 msgctxt "UI_MENU_FRAMEGEN"
 msgid "Frame generation"
@@ -939,6 +988,36 @@ msgctxt "UI_MENU_ICONS_IN_USE"
 msgid "in use: %s"
 msgstr "en uso: %s"
 
+msgctxt "UI_MENU_MENU_SHORTCUT"
+msgid "Menu shortcut"
+msgstr "Atallo do menú"
+
+msgctxt "UI_MENU_MENU_SHORTCUT_DESC"
+msgid ""
+"Choose which controller input opens this menu (Start + Select or the Guide button). Keyboard "
+"defaults to F1 or Esc."
+msgstr ""
+"Escolle que entrada do mando abre este menú (Start + Select ou o botón Guía). O teclado usa F1 ou "
+"Esc."
+
+msgctxt "UI_MENU_SHORTCUT_MINUS_PLUS"
+msgid "Start + Select"
+msgstr "Start + Select"
+
+msgctxt "UI_MENU_SHORTCUT_GUIDE"
+msgid "Guide button"
+msgstr "Botón Guía"
+
+msgctxt "UI_MENU_SHORTCUT_STEAM_NOTE"
+msgid ""
+"Note: If using the Guide button, turn off 'Guide button focuses Steam' in Steam (Settings -> "
+"Controller -> Advanced Settings).\n\nOn Windows, also turn off 'Allow your controller to open "
+"Game Bar' (Settings -> Gaming -> Game Bar)."
+msgstr ""
+"Nota: se usas o botón Guía, desactiva 'Guide button focuses Steam' en Steam (Axustes -> Mando -> "
+"Axustes avanzados).\n\nEn Windows, desactiva tamén 'Allow your controller to open Game Bar' "
+"(Axustes -> Xogos -> Game Bar)."
+
 msgctxt "UI_BINDS_HELP"
 msgid ""
 "Select a cell and press A or Enter, then the key, mouse button or controller button. Delete or X "
@@ -1014,10 +1093,12 @@ msgstr "Xogador %d: %s"
 msgctxt "UI_MENU_PAD_BATTERY_DESC"
 msgid ""
 "The battery of each player's controller, as the controller reports it. Some controllers report "
-"none. A Switch 2 controller over Bluetooth reports a voltage, shown as high, medium or low."
+"none. A Switch 2 controller over Bluetooth reports a voltage and an Xbox controller on Linux's "
+"xone driver a level, each shown as high, medium or low."
 msgstr ""
 "A batería do mando de cada xogador, tal como a indica o mando. Algúns mandos non a indican. Un "
-"mando de Switch 2 por Bluetooth indica unha tensión, que se mostra como alta, media ou baixa."
+"mando de Switch 2 por Bluetooth indica unha tensión e un mando de Xbox en Linux co driver xone un "
+"nivel, cada un mostrado como alto, medio ou baixo."
 
 msgctxt "UI_MENU_PADS_NONE"
 msgid "No controller connected"
@@ -2391,6 +2472,23 @@ msgctxt "UI_GB_ERROR"
 msgid "GameBanana did not answer: %s"
 msgstr "GameBanana non respondeu: %s"
 
+#. %s: the content ratings GameBanana marks the mod with (e.g. Sexual Themes).
+msgctxt "UI_GB_RATED"
+msgid "Content rating: %s"
+msgstr "Contido: %s"
+
+msgctxt "UI_GB_MATURE"
+msgid "NSFW mods"
+msgstr "Mods NSFW"
+
+msgctxt "UI_GB_MATURE_OBFUSCATE"
+msgid "Obfuscate"
+msgstr "Difuminar"
+
+msgctxt "UI_GB_MATURE_SHOW"
+msgid "Show"
+msgstr "Mostrar"
+
 #. Under an installed mod that replaces the game's graphics settings archive (general_format).
 msgctxt "UI_MOD_WARN_GRAPHICS"
 msgid ""
@@ -2416,6 +2514,14 @@ msgid "I understand"
 msgstr "Entendido"
 
 #. Under a mod that changes the game's code (its .ips): the game code is built with it.
+msgctxt "UI_MOD_PLUGIN"
+msgid ""
+"Native plugin: runs its own program on your computer alongside the game. Enable it only if you "
+"trust where it comes from"
+msgstr ""
+"Complemento nativo: executa o seu propio programa no teu ordenador xunto ao xogo. Actívao só se "
+"confías na súa orixe"
+
 msgctxt "UI_MOD_CODE_REBUILD"
 msgid "code: turning it on or off builds the game code again before you play (a few minutes)"
 msgstr "código: activalo ou desactivalo volve crear o código do xogo antes de xogar (uns minutos)"
@@ -2460,6 +2566,22 @@ msgstr "Tes %s · %d MB para descargar"
 msgctxt "UI_LAUNCH_UPDATE_NOW"
 msgid "Update"
 msgstr "Actualizar"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARING"
+msgid "Setting up %s in the background. You can keep playing meanwhile."
+msgstr "Preparando %s en segundo plano. Podes seguir xogando mentres tanto."
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARED"
+msgid "%s is ready"
+msgstr "%s está lista"
+
+msgctxt "UI_LAUNCH_UPDATE_RESTART"
+msgid "Restart with it"
+msgstr "Reiniciar con ela"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARE_FAILED"
+msgid "It could not be set up in advance (%s): it will be set up when it starts."
+msgstr "Non se puido preparar de antemán (%s): prepararase ao iniciala."
 
 #. Opens the release's notes on GitHub.
 msgctxt "UI_LAUNCH_WHATS_NEW"
@@ -2653,6 +2775,18 @@ msgctxt "UI_TOOLS_STEAM_RESTART"
 msgid "Added: restart Steam to see it"
 msgstr "Engadido: reinicia Steam para velo"
 
+#. After Add to Steam, when only some profiles could be updated.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL"
+msgid "Updated %d of %d Steam profiles"
+msgstr "Actualizados %d de %d perfís de Steam"
+
+#. After Add to Steam, when only some profiles could be updated and Steam is running.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL_RESTART"
+msgid "Updated %d of %d Steam profiles. Restart Steam to see the shortcut."
+msgstr "Actualizados %d de %d perfís de Steam. Reinicia Steam para ver o atallo."
+
 #. Why Add to Steam failed.
 msgctxt "UI_TOOLS_STEAM_NONE"
 msgid "Steam is not installed for this user"
@@ -2678,6 +2812,11 @@ msgstr "Buscar agora"
 msgctxt "UI_TOOLS_CHECKING"
 msgid "Checking for a new version..."
 msgstr "Buscando unha nova versión..."
+
+#. The manual update check found no newer version.
+msgctxt "UI_TOOLS_UPDATE_CURRENT"
+msgid "You're up to date."
+msgstr "Tes a última versión."
 
 #. Tools page row: %s is the version before the last update.
 #. printf format: keep every %... conversion, in the same order.
@@ -2885,3 +3024,58 @@ msgstr ""
 msgctxt "UI_LAUNCH_FOUND_FOLDER"
 msgid "folder"
 msgstr ""
+
+msgctxt "UI_LAUNCH_GPU_NONE"
+msgid "No graphics card here can run the game"
+msgstr "Ningunha tarxeta gráfica deste equipo pode executar o xogo"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_OLD"
+msgid "%s: its driver offers %s, and the game needs Vulkan 1.3"
+msgstr "%s: o seu controlador ofrece %s, e o xogo necesita Vulkan 1.3"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_EXT"
+msgid "%s (%s): its driver lacks %s, which the game needs"
+msgstr "%s (%s): ao seu controlador fáltalle %s, que o xogo necesita"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_QUEUE"
+msgid "%s: it has no queue that does both graphics and compute"
+msgstr "%s: non ten ningunha cola que faga á vez gráficos e cálculo"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SKIPPED"
+msgid "%s: not the one chosen in Settings, Screen, Graphics card"
+msgstr "%s: non é a escollida en Configuración, Pantalla, Tarxeta gráfica"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SOFTWARE"
+msgid "%s draws on the processor, not on a graphics card: far too slow to play"
+msgstr "%s debuxa co procesador, non cunha tarxeta gráfica: é demasiado lento para xogar"
+
+msgctxt "UI_LAUNCH_GPU_NO_DRIVER"
+msgid "No Vulkan driver was found."
+msgstr "Non se atopou ningún controlador de Vulkan."
+
+msgctxt "UI_LAUNCH_GPU_HELP"
+msgid ""
+"The game needs Vulkan 1.3. On AMD and Intel that is Mesa 22.0 or newer, newer than Debian 11 and "
+"Ubuntu 20.04 ship; on NVIDIA, its driver 510 or newer. Some older graphics cards cannot have it "
+"at all. The setup can run now: the game starts once the driver is updated."
+msgstr ""
+"O xogo necesita Vulkan 1.3. En AMD e Intel iso é Mesa 22.0 ou posterior, máis recente que o que "
+"traen Debian 11 e Ubuntu 20.04; en NVIDIA, o seu controlador 510 ou posterior. Algunhas tarxetas "
+"gráficas antigas non poden telo. A preparación pódese facer xa: o xogo arrincará cando o "
+"controlador estea actualizado."
+
+msgctxt "UI_LAUNCH_GPU_HELP_WIN"
+msgid ""
+"The game needs Vulkan 1.3: install the latest driver from your graphics card's maker (AMD, Intel "
+"or NVIDIA; on NVIDIA, 510 or newer). Some older graphics cards cannot have it at all. The setup "
+"can run now: the game starts once the driver is updated."
+msgstr ""
+"O xogo necesita Vulkan 1.3: instala o controlador máis recente do fabricante da túa tarxeta "
+"gráfica (AMD, Intel ou NVIDIA; en NVIDIA, o 510 ou posterior). Algunhas tarxetas gráficas antigas "
+"non poden telo. A preparación pódese facer xa: o xogo arrincará cando o controlador estea "
+"actualizado."

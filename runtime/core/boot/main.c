@@ -124,9 +124,9 @@ static const char *log_name_own(void) {
     return n;
 }
 
-// Opens the log file for a game run (game = 1) and writes the buffered lines to it; anything else drops them. Runs on
-// the main thread before the boot starts other threads.
-static void log_open(int game) {
+// Opens the log file for a game run or the start screen (game = 1) and writes the buffered lines to it; anything else
+// drops them. Runs on the main thread before the boot starts other threads.
+static void log_open(int game, const char *own) {
     char dir[PLAT_PATH_MAX * 3], from[PLAT_PATH_MAX * 3 + 16], to[PLAT_PATH_MAX * 3 + 16];
     char *cut = NULL;
     if (game && !plat_stderr_path(dir, sizeof dir) && *cfg_game_dir()) {
@@ -139,7 +139,6 @@ static void log_open(int game) {
         // A run that is not the player's (the setup's warm-up, tools/prepare/prepare.py) names its own file and leaves
         // mkw.log and its rotation alone: else updating pushed the player's crash out of mkw.log, the file a report
         // attaches and the start screen reads (#437, 16/11/2026: the attached mkw.log was the 0.1.12 warm-up)
-        const char *own = log_name_own();
         if (own) {
             snprintf(g_log_path, sizeof g_log_path, "%s/%s.log", dir, own);
         } else {
@@ -511,10 +510,10 @@ static int selftest(void) {
 }
 
 static int usage(const char *argv0) {
-    fprintf(stderr, "usage: %s [--exefs DIR] [--romfs DIR|FILE.nup|FILE.nx] [--nup FILE] [--profile DIR] [--launcher | --play | --selftest | --probe-loader | "
+    fprintf(stderr, "usage: %s [--exefs DIR] [--romfs DIR|FILE.nup|FILE.nx] [--nup FILE] [--profile DIR] [--mod NAME]... [--launcher | --play | --selftest | --probe-loader | --probe-plugin | "
                     "--probe-cfg | --probe-kernel | --probe-audio | --probe-services | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-vkmem | "
-                    "--probe-vkexec | --probe-astc | --probe-framegen | --probe-gpu-clocks | --probe-fps | --probe-oflow | --probe-fsr-fg | --probe-discord | --probe-dsu | --probe-texpre | --texpre | --prewarm | --boot |--seconds S [--shot PNG]]\n", argv0);
+                    "--probe-vkexec | --probe-astc | --probe-framegen | --probe-gpu-clocks | --probe-fps | --probe-oflow | --probe-fsr-fg | --probe-merge | --probe-spill | --probe-discord | --probe-dsu | --probe-texpre | --texpre | --prewarm | --boot |--seconds S [--shot PNG]]\n", argv0);
     return 2;
 }
 
@@ -586,6 +585,12 @@ void launcher_refresh_romfs(void) {
 
 static int run_launcher(int argc, char **argv) {
     cfg_init();   // mkw.ini: the settings pages read and write it
+    // logs/launcher.log, with the crash handler: a start screen that stopped before its window showed left nothing on
+    // disk, as the game's mkw.log only opens in the game's own process (#634, 19/11/2026: "didnt find any log"). Its
+    // own name leaves mkw.log for the last-run notice. Keep the default local so relaunches cannot inherit it.
+    const char *log_name = log_name_own();
+    log_open(1, log_name ? log_name : "launcher");
+    plat_crash_hook(crash_handler);
     // the Mods page merges against the same romfs the game will boot: argv wins, else MKW_ROMFS / mkw.ini,
     // else the selected installation, else the baked-in default
     for (int i = 1; i + 1 < argc; i++)
@@ -645,11 +650,18 @@ int main(int argc, char **argv) {
     }
     // --replay DIR [options]: a capture (runtime/gfx/cap) through the back end, without the game
     if (argc >= 2 && !strcmp(argv[1], "--replay")) {
-        log_open(0);
+        log_open(0, NULL);
         return cap_replay_main(argc - 2, argv + 2);
     }
     const char *mode = NULL;
+    static char extra_mods[1024];   // --mod NAME, repeatable: added to the Mods page's enabled list for this run
     for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--mod")) {
+            if (++i == argc || strchr(argv[i], ',')) return usage(argv[0]);
+            size_t len = strlen(extra_mods);
+            snprintf(extra_mods + len, sizeof extra_mods - len, "%s%s", len ? "," : "", argv[i]);
+            continue;
+        }
         // --romfs takes the loose romfs/ folder or a packed dump, .nup or .nx (romfs.c); --nup is the same
         const char **path = !strcmp(argv[i], "--exefs") ? &cfg.exefs
                           : !strcmp(argv[i], "--romfs") || !strcmp(argv[i], "--nup") ? &cfg.romfs
@@ -674,8 +686,18 @@ int main(int argc, char **argv) {
         }
     }
     if (cfg.shot && !cfg.seconds) return usage(argv[0]);
+    if (*extra_mods) {   // another launcher starts the game with its mod on, without touching the player's mkw.ini
+        const char *on = cfg_get("MKW_MODS");
+        char list[4096];
+        snprintf(list, sizeof list, "%s%s%s", on && *on ? on : "", on && *on ? "," : "", extra_mods);
+        plat_setenv("MKW_MODS", list);
+    }
     if (cfg.seconds && mode) return usage(argv[0]);
-    log_open(!mode);
+    // the setup's warm step (--prewarm) keeps its log too, as logs/warm.log (MKW_LOG_NAME): until 18/11/2026 it went
+    // nowhere, and prepare.py drops its output, so a prewarm that failed on a player's PC left no trace. Only with its
+    // own name: a --prewarm by hand must not rotate the player's mkw.log
+    const char *log_name = log_name_own();
+    log_open(!mode || (!strcmp(mode, "--prewarm") && log_name), log_name);
     // the player the launcher picked (core/base/players.h): its account and save; the lock stays on the folder
     static char player_profile[PLAT_PATH_MAX * 2];
     cfg.profile_base = cfg.profile;
@@ -689,6 +711,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--selftest")) return selftest();
     if (!strcmp(mode, "--probe-loader")) return probe_loader();
     if (!strcmp(mode, "--probe-cfg")) return probe_cfg();
+    if (!strcmp(mode, "--probe-plugin")) return probe_plugin();
     if (!strcmp(mode, "--probe-kernel")) return probe_kernel();
     if (!strcmp(mode, "--probe-audio")) return probe_audio();
     if (!strcmp(mode, "--probe-services")) return probe_services();
@@ -705,6 +728,8 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-fps")) return probe_fps();
     if (!strcmp(mode, "--probe-oflow")) return probe_oflow();
     if (!strcmp(mode, "--probe-fsr-fg")) return probe_fsr_fg();
+    if (!strcmp(mode, "--probe-merge")) return probe_merge();
+    if (!strcmp(mode, "--probe-spill")) return probe_spill();
     if (!strcmp(mode, "--probe-discord")) return probe_discord();
     if (!strcmp(mode, "--probe-dsu")) return probe_dsu();
     if (!strcmp(mode, "--probe-vkdevice")) return probe_vkdevice();

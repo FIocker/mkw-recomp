@@ -8,6 +8,21 @@ msgctxt "UI_SWKBD_DEFAULT_NAME"
 msgid "Player"
 msgstr "Гравець"
 
+#. The on-screen number pad the game opens to ask for a number: its confirm key (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_OK"
+msgid "OK"
+msgstr "ОК"
+
+#. The on-screen number pad: the wide button under the keys that closes it without a number
+msgctxt "UI_KEYPAD_CANCEL"
+msgid "Cancel"
+msgstr "Скасувати"
+
+#. The on-screen number pad: the key that erases the last digit (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_DELETE"
+msgid "Delete"
+msgstr "Стерти"
+
 msgctxt "UI_MENU_TITLE"
 msgid "Settings"
 msgstr "Налаштування"
@@ -358,6 +373,26 @@ msgctxt "UI_MENU_ASPECT_WINDOW"
 msgid "Window"
 msgstr "Вікно"
 
+msgctxt "UI_MENU_HUD_POSITION"
+msgid "HUD position"
+msgstr "Положення HUD"
+
+msgctxt "UI_MENU_HUD_POSITION_DESC"
+msgid ""
+"On a picture wider or taller than 16:9, keep the race HUD in the middle 16:9 area (the console's "
+"place) or put it at the screen's edges and corners. Takes effect at the next start."
+msgstr ""
+"На зображенні, ширшому або вищому за 16:9, HUD перегонів лишається в середній області 16:9 (як на "
+"консолі) або переходить до країв і кутів екрана. Діє з наступного запуску."
+
+msgctxt "UI_MENU_HUD_POSITION_16X9"
+msgid "16:9 area"
+msgstr "Область 16:9"
+
+msgctxt "UI_MENU_HUD_POSITION_EDGES"
+msgid "Screen edges"
+msgstr "Краї екрана"
+
 msgctxt "UI_MENU_PRESENT"
 msgid "Presentation"
 msgstr "Виведення"
@@ -448,6 +483,20 @@ msgstr ""
 msgctxt "UI_MENU_FPS_AUTO"
 msgid "Automatic"
 msgstr "Автоматично"
+
+msgctxt "UI_MENU_LOGIC_HZ"
+msgid "Logic rate"
+msgstr "Частота логіки"
+
+msgctxt "UI_MENU_LOGIC_HZ_DESC"
+msgid ""
+"How many times a second the game updates karts, physics and timers. 60 is the console's rate; "
+"120, 144 or 240 make movement smoother on a high refresh rate screen but need a faster PC. Time "
+"trials and LAN games always run at 60."
+msgstr ""
+"Скільки разів на секунду гра оновлює карти, фізику й таймери. 60 — як на консолі; 120, 144 або "
+"240 роблять рух плавнішим на екрані з високою частотою оновлення, але потребують швидшого ПК. "
+"Заїзди на час та ігри по LAN завжди йдуть на 60."
 
 msgctxt "UI_MENU_FRAMEGEN"
 msgid "Frame generation"
@@ -939,6 +988,36 @@ msgctxt "UI_MENU_ICONS_IN_USE"
 msgid "in use: %s"
 msgstr "використовується: %s"
 
+msgctxt "UI_MENU_MENU_SHORTCUT"
+msgid "Menu shortcut"
+msgstr "Виклик меню"
+
+msgctxt "UI_MENU_MENU_SHORTCUT_DESC"
+msgid ""
+"Choose which controller input opens this menu (Start + Select or the Guide button). Keyboard "
+"defaults to F1 or Esc."
+msgstr ""
+"Виберіть, яка кнопка контролера відкриває це меню (Start + Select або кнопка Guide). На "
+"клавіатурі за замовчуванням F1 або Esc."
+
+msgctxt "UI_MENU_SHORTCUT_MINUS_PLUS"
+msgid "Start + Select"
+msgstr "Start + Select"
+
+msgctxt "UI_MENU_SHORTCUT_GUIDE"
+msgid "Guide button"
+msgstr "Кнопка Guide"
+
+msgctxt "UI_MENU_SHORTCUT_STEAM_NOTE"
+msgid ""
+"Note: If using the Guide button, turn off 'Guide button focuses Steam' in Steam (Settings -> "
+"Controller -> Advanced Settings).\n\nOn Windows, also turn off 'Allow your controller to open "
+"Game Bar' (Settings -> Gaming -> Game Bar)."
+msgstr ""
+"Примітка: якщо ви використовуєте кнопку Guide, вимкніть 'Guide button focuses Steam' у Steam "
+"(Налаштування -> Контролер -> Розширені налаштування).\n\nУ Windows також вимкніть 'Allow your "
+"controller to open Game Bar' (Налаштування -> Ігри -> Game Bar)."
+
 msgctxt "UI_BINDS_HELP"
 msgid ""
 "Select a cell and press A or Enter, then the key, mouse button or controller button. Delete or X "
@@ -1016,11 +1095,12 @@ msgstr "Гравець %d: %s"
 msgctxt "UI_MENU_PAD_BATTERY_DESC"
 msgid ""
 "The battery of each player's controller, as the controller reports it. Some controllers report "
-"none. A Switch 2 controller over Bluetooth reports a voltage, shown as high, medium or low."
+"none. A Switch 2 controller over Bluetooth reports a voltage and an Xbox controller on Linux's "
+"xone driver a level, each shown as high, medium or low."
 msgstr ""
 "Заряд геймпада кожного гравця, як його повідомляє геймпад. Деякі геймпади його не повідомляють. "
-"Геймпад Switch 2 через Bluetooth повідомляє напругу, вона показана як високий, середній або "
-"низький заряд."
+"Геймпад Switch 2 через Bluetooth повідомляє напругу, а геймпад Xbox у Linux з драйвером xone "
+"рівень заряду; кожен показано як високий, середній або низький заряд."
 
 msgctxt "UI_MENU_PADS_NONE"
 msgid "No controller connected"
@@ -2393,6 +2473,23 @@ msgctxt "UI_GB_ERROR"
 msgid "GameBanana did not answer: %s"
 msgstr "GameBanana не відповів: %s"
 
+#. %s: the content ratings GameBanana marks the mod with (e.g. Sexual Themes).
+msgctxt "UI_GB_RATED"
+msgid "Content rating: %s"
+msgstr "Рейтинг контенту: %s"
+
+msgctxt "UI_GB_MATURE"
+msgid "NSFW mods"
+msgstr "NSFW-моди"
+
+msgctxt "UI_GB_MATURE_OBFUSCATE"
+msgid "Obfuscate"
+msgstr "Розмити"
+
+msgctxt "UI_GB_MATURE_SHOW"
+msgid "Show"
+msgstr "Показати"
+
 #. Under an installed mod that replaces the game's graphics settings archive (general_format).
 msgctxt "UI_MOD_WARN_GRAPHICS"
 msgid ""
@@ -2419,6 +2516,14 @@ msgid "I understand"
 msgstr "Зрозуміло"
 
 #. Under a mod that changes the game's code (its .ips): the game code is built with it.
+msgctxt "UI_MOD_PLUGIN"
+msgid ""
+"Native plugin: runs its own program on your computer alongside the game. Enable it only if you "
+"trust where it comes from"
+msgstr ""
+"Нативний плагін: запускає власну програму на вашому комп'ютері разом із грою. Вмикайте його, лише "
+"якщо довіряєте джерелу"
+
 msgctxt "UI_MOD_CODE_REBUILD"
 msgid "code: turning it on or off builds the game code again before you play (a few minutes)"
 msgstr "код: увімкнення чи вимкнення заново збирає код гри перед запуском (кілька хвилин)"
@@ -2463,6 +2568,22 @@ msgstr "У вас %s · %d MB для завантаження"
 msgctxt "UI_LAUNCH_UPDATE_NOW"
 msgid "Update"
 msgstr "Оновити"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARING"
+msgid "Setting up %s in the background. You can keep playing meanwhile."
+msgstr "%s налаштовується у фоні. Тим часом можна грати далі."
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARED"
+msgid "%s is ready"
+msgstr "%s готова"
+
+msgctxt "UI_LAUNCH_UPDATE_RESTART"
+msgid "Restart with it"
+msgstr "Перезапустити з нею"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARE_FAILED"
+msgid "It could not be set up in advance (%s): it will be set up when it starts."
+msgstr "Не вдалося підготувати заздалегідь (%s): підготовка відбудеться під час запуску."
 
 #. Opens the release's notes on GitHub.
 msgctxt "UI_LAUNCH_WHATS_NEW"
@@ -2655,6 +2776,18 @@ msgctxt "UI_TOOLS_STEAM_RESTART"
 msgid "Added: restart Steam to see it"
 msgstr "Додано: перезапустіть Steam, побачите"
 
+#. After Add to Steam, when only some profiles could be updated.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL"
+msgid "Updated %d of %d Steam profiles"
+msgstr "Оновлено профілів Steam: %d з %d"
+
+#. After Add to Steam, when only some profiles could be updated and Steam is running.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL_RESTART"
+msgid "Updated %d of %d Steam profiles. Restart Steam to see the shortcut."
+msgstr "Оновлено профілів Steam: %d з %d. Перезапустіть Steam, щоб побачити ярлик."
+
 #. Why Add to Steam failed.
 msgctxt "UI_TOOLS_STEAM_NONE"
 msgid "Steam is not installed for this user"
@@ -2680,6 +2813,11 @@ msgstr "Перевірити зараз"
 msgctxt "UI_TOOLS_CHECKING"
 msgid "Checking for a new version..."
 msgstr "Пошук нової версії..."
+
+#. The manual update check found no newer version.
+msgctxt "UI_TOOLS_UPDATE_CURRENT"
+msgid "You're up to date."
+msgstr "У вас остання версія."
 
 #. Tools page row: %s is the version before the last update.
 #. printf format: keep every %... conversion, in the same order.
@@ -2890,3 +3028,56 @@ msgstr ""
 msgctxt "UI_LAUNCH_FOUND_FOLDER"
 msgid "folder"
 msgstr ""
+
+msgctxt "UI_LAUNCH_GPU_NONE"
+msgid "No graphics card here can run the game"
+msgstr "Жодна відеокарта цього комп'ютера не може запустити гру"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_OLD"
+msgid "%s: its driver offers %s, and the game needs Vulkan 1.3"
+msgstr "%s: її драйвер пропонує %s, а грі потрібен Vulkan 1.3"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_EXT"
+msgid "%s (%s): its driver lacks %s, which the game needs"
+msgstr "%s (%s): її драйверу бракує %s, яке потрібне грі"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_QUEUE"
+msgid "%s: it has no queue that does both graphics and compute"
+msgstr "%s: у неї немає черги, що виконує одночасно графіку та обчислення"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SKIPPED"
+msgid "%s: not the one chosen in Settings, Screen, Graphics card"
+msgstr "%s: це не та, що вибрана в Налаштування, Екран, Відеокарта"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SOFTWARE"
+msgid "%s draws on the processor, not on a graphics card: far too slow to play"
+msgstr "%s малює процесором, а не відеокартою: надто повільно для гри"
+
+msgctxt "UI_LAUNCH_GPU_NO_DRIVER"
+msgid "No Vulkan driver was found."
+msgstr "Драйвер Vulkan не знайдено."
+
+msgctxt "UI_LAUNCH_GPU_HELP"
+msgid ""
+"The game needs Vulkan 1.3. On AMD and Intel that is Mesa 22.0 or newer, newer than Debian 11 and "
+"Ubuntu 20.04 ship; on NVIDIA, its driver 510 or newer. Some older graphics cards cannot have it "
+"at all. The setup can run now: the game starts once the driver is updated."
+msgstr ""
+"Грі потрібен Vulkan 1.3. Для AMD та Intel це Mesa 22.0 або новіша, новіша, ніж у Debian 11 та "
+"Ubuntu 20.04; для NVIDIA — драйвер 510 або новіший. Деякі старі відеокарти не підтримують його "
+"взагалі. Налаштування можна виконати вже зараз: гра запуститься, щойно драйвер буде оновлено."
+
+msgctxt "UI_LAUNCH_GPU_HELP_WIN"
+msgid ""
+"The game needs Vulkan 1.3: install the latest driver from your graphics card's maker (AMD, Intel "
+"or NVIDIA; on NVIDIA, 510 or newer). Some older graphics cards cannot have it at all. The setup "
+"can run now: the game starts once the driver is updated."
+msgstr ""
+"Грі потрібен Vulkan 1.3: встановіть найновіший драйвер від виробника вашої відеокарти (AMD, Intel "
+"або NVIDIA; для NVIDIA — 510 або новіший). Деякі старі відеокарти не підтримують його взагалі. "
+"Налаштування можна виконати вже зараз: гра запуститься, щойно драйвер буде оновлено."

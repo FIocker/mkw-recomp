@@ -35,7 +35,6 @@
                                  // its fence (the present thread holding the replay's drain)
 #define MAX_IMAGES 16
 #define VSYNC_NS 1000000000ull
-#define VSYNC_HZ 60
 
 // ---- queue lock
 // Taking it sends the parts waiting for the submit thread first (vk_sync.c, MKW_SUBMIT_THREAD): what the taker submits
@@ -204,7 +203,7 @@ static void pw_main(void *arg) {
         static int nudge = -1;
         if (nudge < 0) nudge = cfg_get("MKW_PHASE_LOCK") && !strcmp(cfg_get("MKW_PHASE_LOCK"), "nudge");
         int move = !nudge ? 0 : PW.cool ? (PW.cool--, 0)
-                 : spread > refresh * 0.45 && gfx_vsync_tick_ns() != VSYNC_NS / VSYNC_HZ;
+                 : spread > refresh * 0.45 && gfx_vsync_tick_ns() != VSYNC_NS / (uint64_t)frame_logic_hz();
         if (move) {
             plat_xchg64(&g_nudge, (int64_t)(refresh * 0.5e6));
             PW.cool = 2, PW.moves++;
@@ -248,17 +247,18 @@ uint64_t gfx_vsync_tick_ns(void) {
     static int on;
     unsigned v = cfg_version();
     if (v != seen) seen = v, on = fg_pacing("MKW_VSYNC_LOCK");
-    double hz = vk_present_refresh_hz();
+    // the tick is 1/MKW_LOGIC_HZ s (60 by default); locked, k display refreshes when the display runs at k times it
+    double hz = vk_present_refresh_hz(), n = (double)frame_logic_hz();
     if (on && hz > 40.0) {
-        double k = floor(hz / 60.0 + 0.5);
-        if (k >= 1.0 && fabs(hz / k - 60.0) < 0.3) {
+        double k = floor(hz / n + 0.5);
+        if (k >= 1.0 && fabs(hz / k - n) < 0.3 * n / 60.0) {
             uint64_t t = (uint64_t)(1e9 * k / hz + 0.5);
             if (told != t) told = t, rt_log("gfx: vsync tick %.4f ms, locked to the display's %.3f Hz", t / 1e6, hz);
             return t;
         }
     }
-    if (told) told = 0, rt_log("gfx: vsync tick back to the console's 60 Hz");
-    return VSYNC_NS / VSYNC_HZ;
+    if (told) told = 0, rt_log("gfx: vsync tick back to %d Hz", frame_logic_hz());
+    return VSYNC_NS / (uint64_t)frame_logic_hz();
 }
 
 // ---- swapchain and present state (g_pl)

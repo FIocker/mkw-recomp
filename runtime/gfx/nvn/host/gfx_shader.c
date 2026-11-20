@@ -109,6 +109,7 @@ static void prepared_init(void *param) {
         snprintf(prepared_dir, sizeof prepared_dir, "%s/spirv", cfg_game_dir());
     }
     rt_log("gfx_shader: prepared SPIR-V from %s", prepared_dir);
+    gfx_shader_pack_open(prepared_dir);
 }
 
 static void prepared_paths(void) {
@@ -116,18 +117,25 @@ static void prepared_paths(void) {
     plat_once(&once, prepared_init, NULL);
 }
 
-static GfxShader *prepared_load(const uint8_t key[32], const uint8_t *control) {
+// A program's prepared file of kind 0 .spv, 1 .res.json, 2 .cs.spv: from spirv/shaders.pack, else <key><suffix>.
+static uint8_t *prepared_read(const uint8_t key[32], int kind, uint64_t *size) {
+    static const char *const suffix[] = {".spv", ".res.json", ".cs.spv"};
+    uint8_t *b;
+    if (gfx_shader_pack_read(key, kind, &b, size)) return b;
     char hex[65], p[PATH_CAP + 80];
     gfx_shader_key_hex(key, hex);
+    snprintf(p, sizeof p, "%s/%s%s", prepared_dir, hex, suffix[kind]);
+    return read_file(p, size);
+}
+
+static GfxShader *prepared_load(const uint8_t key[32], const uint8_t *control) {
     uint64_t spv_size = 0, res_size = 0;
-    snprintf(p, sizeof p, "%s/%s.res.json", prepared_dir, hex);
-    uint8_t *res = read_file(p, &res_size);
+    uint8_t *res = prepared_read(key, 1, &res_size);
     if (!res || !reflection_valid((const char *)res, res_size)) {
         free(res);
         return NULL;
     }
-    snprintf(p, sizeof p, "%s/%s.spv", prepared_dir, hex);
-    uint8_t *spv = read_file(p, &spv_size);
+    uint8_t *spv = prepared_read(key, 0, &spv_size);
     uint32_t magic = 0;
     if (spv && spv_size >= 20) memcpy(&magic, spv, 4);
     if (!spv || spv_size % 4 || magic != 0x07230203 || !spirv_complete((const uint32_t *)spv, spv_size / 4)) {
@@ -152,6 +160,13 @@ static GfxShader *prepared_load(const uint8_t key[32], const uint8_t *control) {
         }
     }
     gfx_shader_reflect(s);
+    if (s->stage == GFX_STAGE_CS && !s->cs_known) {
+        // loaded by key (a prewarm) from a translation older than its "cs_table": its resources would sit in the
+        // wrong slots, and the cache would keep it so for the game's dispatch. Left out: the game loads it with its
+        // control.
+        shader_free(s);
+        return NULL;
+    }
     s->spirv_state = SPIRV_PREPARED;
     return gfx_shader_insert(s);
 }
@@ -235,6 +250,31 @@ void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **o
            (long long)PW.miss, nt + 1);
 }
 
+// ---- every program of shaders.pack, loaded while the boot prewarm creates the device (vk_pipe_keys.c prewarm_run):
+// the pairs prewarm reads them all, and they need no device. pack-boot2 (18/11/2026, file cache cold, Windows PC): the
+// device took 7.2 s and the load 2.7 s more after it.
+static struct { uint8_t (*ids)[32]; const GfxShader **out; size_t n; } PL;
+
+static void preload_main(void *arg) {
+    (void)arg;
+    gfx_shader_prewarm((const uint8_t(*)[32])PL.ids, PL.n, PL.out);
+}
+
+PlatThread *gfx_shader_preload_start(void) {
+    prepared_paths();
+    PL.n = gfx_shader_pack_keys(&PL.ids);
+    PL.out = PL.n ? calloc(PL.n, sizeof *PL.out) : NULL;
+    PlatThread *t = PL.out ? plat_thread_new(preload_main, NULL, "shader preload") : NULL;
+    if (!t) free(PL.ids), free(PL.out), PL.ids = NULL, PL.out = NULL;
+    return t;
+}
+
+void gfx_shader_preload_join(PlatThread *t) {
+    if (!t) return;
+    plat_thread_join(t);
+    free(PL.ids), free(PL.out), PL.ids = NULL, PL.out = NULL;
+}
+
 // ---- SPIR-V released after the prewarm
 // The pairs prewarm (vk_pipe_pairs.c) loads every program of the copy, 306 MiB of SPIR-V on the 660M (pk-mem,
 // 17/11/2026), to build their libraries; most are never drawn in a session. Those the prewarm alone read are freed
@@ -247,12 +287,13 @@ void gfx_shader_spirv_quiet(int on) { spirv_quiet = on; }
 static void spirv_reload(GfxShader *s) {
     plat_mutex_lock(&spirv_lock);
     if (__atomic_load_n(&s->spirv_state, __ATOMIC_ACQUIRE) == SPIRV_RELEASED) {
-        char hex[65], p[PATH_CAP + 80];
-        gfx_shader_key_hex(s->key, hex);
-        snprintf(p, sizeof p, "%s/%s.spv", prepared_dir, hex);
         uint64_t n = 0;
-        uint8_t *spv = read_file(p, &n);
-        if (!spv || n != s->words * 4) rt_fatal("gfx_shader: %s changed or went missing since it was loaded", p);
+        uint8_t *spv = prepared_read(s->key, 0, &n);
+        if (!spv || n != s->words * 4) {
+            char hex[65];
+            gfx_shader_key_hex(s->key, hex);
+            rt_fatal("gfx_shader: %s/%s.spv changed or went missing since it was loaded", prepared_dir, hex);
+        }
         s->spirv = (uint32_t *)spv;
         __atomic_store_n(&s->spirv_state, SPIRV_KEPT, __ATOMIC_RELEASE);
     }
@@ -425,7 +466,7 @@ const GfxShader *gfx_shader_cs_variant(const GfxShader *s) {
         gfx_shader_key_hex(s->key, hex);
         snprintf(p, sizeof p, "%s/%s.cs.spv", prepared_dir, hex);
         uint64_t n = 0;
-        uint8_t *spv = read_file(p, &n);
+        uint8_t *spv = prepared_read(s->key, 2, &n);
         uint32_t magic = 0;
         if (spv && n >= 20) memcpy(&magic, spv, 4);
         char *res = malloc(s->reflection_size + 1);

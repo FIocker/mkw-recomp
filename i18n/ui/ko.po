@@ -8,6 +8,21 @@ msgctxt "UI_SWKBD_DEFAULT_NAME"
 msgid "Player"
 msgstr "플레이어"
 
+#. The on-screen number pad the game opens to ask for a number: its confirm key (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_OK"
+msgid "OK"
+msgstr "확인"
+
+#. The on-screen number pad: the wide button under the keys that closes it without a number
+msgctxt "UI_KEYPAD_CANCEL"
+msgid "Cancel"
+msgstr "취소"
+
+#. The on-screen number pad: the key that erases the last digit (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_DELETE"
+msgid "Delete"
+msgstr "삭제"
+
 msgctxt "UI_MENU_TITLE"
 msgid "Settings"
 msgstr "설정"
@@ -343,6 +358,24 @@ msgctxt "UI_MENU_ASPECT_WINDOW"
 msgid "Window"
 msgstr "창"
 
+msgctxt "UI_MENU_HUD_POSITION"
+msgid "HUD position"
+msgstr "HUD 위치"
+
+msgctxt "UI_MENU_HUD_POSITION_DESC"
+msgid ""
+"On a picture wider or taller than 16:9, keep the race HUD in the middle 16:9 area (the console's "
+"place) or put it at the screen's edges and corners. Takes effect at the next start."
+msgstr "16:9보다 넓거나 높은 화면에서 레이스 HUD를 가운데 16:9 영역(본체와 같은 위치)에 두거나 화면의 가장자리와 모서리로 옮깁니다. 다음 실행부터 적용됩니다."
+
+msgctxt "UI_MENU_HUD_POSITION_16X9"
+msgid "16:9 area"
+msgstr "16:9 영역"
+
+msgctxt "UI_MENU_HUD_POSITION_EDGES"
+msgid "Screen edges"
+msgstr "화면 가장자리"
+
 msgctxt "UI_MENU_PRESENT"
 msgid "Presentation"
 msgstr "화면 출력"
@@ -431,6 +464,19 @@ msgstr ""
 msgctxt "UI_MENU_FPS_AUTO"
 msgid "Automatic"
 msgstr "자동"
+
+msgctxt "UI_MENU_LOGIC_HZ"
+msgid "Logic rate"
+msgstr "로직 갱신 빈도"
+
+msgctxt "UI_MENU_LOGIC_HZ_DESC"
+msgid ""
+"How many times a second the game updates karts, physics and timers. 60 is the console's rate; "
+"120, 144 or 240 make movement smoother on a high refresh rate screen but need a faster PC. Time "
+"trials and LAN games always run at 60."
+msgstr ""
+"게임이 1초에 카트, 물리, 타이머를 갱신하는 횟수입니다. 60은 본체와 같습니다. 120, 144, 240은 고주사율 화면에서 움직임을 더 부드럽게 하지만 더 빠른 PC가 "
+"필요합니다. 타임 어택과 LAN 게임은 항상 60으로 진행됩니다."
 
 msgctxt "UI_MENU_FRAMEGEN"
 msgid "Frame generation"
@@ -895,6 +941,33 @@ msgctxt "UI_MENU_ICONS_IN_USE"
 msgid "in use: %s"
 msgstr "사용 중: %s"
 
+msgctxt "UI_MENU_MENU_SHORTCUT"
+msgid "Menu shortcut"
+msgstr "메뉴 단축키"
+
+msgctxt "UI_MENU_MENU_SHORTCUT_DESC"
+msgid ""
+"Choose which controller input opens this menu (Start + Select or the Guide button). Keyboard "
+"defaults to F1 or Esc."
+msgstr "이 메뉴를 여는 컨트롤러 입력을 선택하세요(Start + Select 또는 Guide 버튼). 키보드는 기본적으로 F1 또는 Esc입니다."
+
+msgctxt "UI_MENU_SHORTCUT_MINUS_PLUS"
+msgid "Start + Select"
+msgstr "Start + Select"
+
+msgctxt "UI_MENU_SHORTCUT_GUIDE"
+msgid "Guide button"
+msgstr "Guide 버튼"
+
+msgctxt "UI_MENU_SHORTCUT_STEAM_NOTE"
+msgid ""
+"Note: If using the Guide button, turn off 'Guide button focuses Steam' in Steam (Settings -> "
+"Controller -> Advanced Settings).\n\nOn Windows, also turn off 'Allow your controller to open "
+"Game Bar' (Settings -> Gaming -> Game Bar)."
+msgstr ""
+"참고: Guide 버튼을 사용하는 경우 Steam의 'Guide button focuses Steam'(설정 -> 컨트롤러 -> 고급 설정)을 "
+"끄세요.\n\nWindows에서는 'Allow your controller to open Game Bar'(설정 -> 게임 -> Game Bar)도 끄세요."
+
 msgctxt "UI_BINDS_HELP"
 msgid ""
 "Select a cell and press A or Enter, then the key, mouse button or controller button. Delete or X "
@@ -969,10 +1042,11 @@ msgstr "플레이어 %d: %s"
 msgctxt "UI_MENU_PAD_BATTERY_DESC"
 msgid ""
 "The battery of each player's controller, as the controller reports it. Some controllers report "
-"none. A Switch 2 controller over Bluetooth reports a voltage, shown as high, medium or low."
+"none. A Switch 2 controller over Bluetooth reports a voltage and an Xbox controller on Linux's "
+"xone driver a level, each shown as high, medium or low."
 msgstr ""
-"각 플레이어 컨트롤러의 배터리로, 컨트롤러가 알려주는 값입니다. 알려주지 않는 컨트롤러도 있습니다. 블루투스로 연결한 Switch 2 컨트롤러는 전압을 알려주며 높음, 보통, "
-"낮음으로 표시합니다."
+"각 플레이어 컨트롤러의 배터리로, 컨트롤러가 알려주는 값입니다. 알려주지 않는 컨트롤러도 있습니다. 블루투스로 연결한 Switch 2 컨트롤러는 전압을, Linux의 xone "
+"드라이버로 연결한 Xbox 컨트롤러는 단계를 알려주며 높음, 보통, 낮음으로 표시합니다."
 
 msgctxt "UI_MENU_PADS_NONE"
 msgid "No controller connected"
@@ -2321,6 +2395,23 @@ msgctxt "UI_GB_ERROR"
 msgid "GameBanana did not answer: %s"
 msgstr "GameBanana가 응답하지 않았습니다: %s"
 
+#. %s: the content ratings GameBanana marks the mod with (e.g. Sexual Themes).
+msgctxt "UI_GB_RATED"
+msgid "Content rating: %s"
+msgstr "콘텐츠 등급: %s"
+
+msgctxt "UI_GB_MATURE"
+msgid "NSFW mods"
+msgstr "NSFW 모드"
+
+msgctxt "UI_GB_MATURE_OBFUSCATE"
+msgid "Obfuscate"
+msgstr "가리기"
+
+msgctxt "UI_GB_MATURE_SHOW"
+msgid "Show"
+msgstr "표시"
+
 #. Under an installed mod that replaces the game's graphics settings archive (general_format).
 msgctxt "UI_MOD_WARN_GRAPHICS"
 msgid ""
@@ -2343,6 +2434,12 @@ msgid "I understand"
 msgstr "이해했습니다"
 
 #. Under a mod that changes the game's code (its .ips): the game code is built with it.
+msgctxt "UI_MOD_PLUGIN"
+msgid ""
+"Native plugin: runs its own program on your computer alongside the game. Enable it only if you "
+"trust where it comes from"
+msgstr "네이티브 플러그인: 게임과 함께 컴퓨터에서 자체 프로그램을 실행합니다. 출처를 신뢰할 수 있을 때만 켜세요"
+
 msgctxt "UI_MOD_CODE_REBUILD"
 msgid "code: turning it on or off builds the game code again before you play (a few minutes)"
 msgstr "코드: 켜거나 끄면 플레이 전에 게임 코드를 다시 빌드합니다(몇 분)"
@@ -2385,6 +2482,22 @@ msgstr "%s · %d MB 다운로드 예정"
 msgctxt "UI_LAUNCH_UPDATE_NOW"
 msgid "Update"
 msgstr "업데이트"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARING"
+msgid "Setting up %s in the background. You can keep playing meanwhile."
+msgstr "%s을(를) 백그라운드에서 준비하는 중입니다. 그동안 계속 플레이할 수 있습니다."
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARED"
+msgid "%s is ready"
+msgstr "%s 준비 완료"
+
+msgctxt "UI_LAUNCH_UPDATE_RESTART"
+msgid "Restart with it"
+msgstr "이 버전으로 다시 시작"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARE_FAILED"
+msgid "It could not be set up in advance (%s): it will be set up when it starts."
+msgstr "미리 준비하지 못했습니다(%s). 시작할 때 준비됩니다."
 
 #. Opens the release's notes on GitHub.
 msgctxt "UI_LAUNCH_WHATS_NEW"
@@ -2576,6 +2689,18 @@ msgctxt "UI_TOOLS_STEAM_RESTART"
 msgid "Added: restart Steam to see it"
 msgstr "추가됨: 보려면 Steam을 다시 시작하세요"
 
+#. After Add to Steam, when only some profiles could be updated.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL"
+msgid "Updated %d of %d Steam profiles"
+msgstr "Steam 프로필 %d/%d개 업데이트됨"
+
+#. After Add to Steam, when only some profiles could be updated and Steam is running.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL_RESTART"
+msgid "Updated %d of %d Steam profiles. Restart Steam to see the shortcut."
+msgstr "Steam 프로필 %d/%d개 업데이트됨. 바로가기를 보려면 Steam을 다시 시작하세요."
+
 #. Why Add to Steam failed.
 msgctxt "UI_TOOLS_STEAM_NONE"
 msgid "Steam is not installed for this user"
@@ -2601,6 +2726,11 @@ msgstr "지금 확인"
 msgctxt "UI_TOOLS_CHECKING"
 msgid "Checking for a new version..."
 msgstr "새 버전을 확인하는 중..."
+
+#. The manual update check found no newer version.
+msgctxt "UI_TOOLS_UPDATE_CURRENT"
+msgid "You're up to date."
+msgstr "최신 버전입니다."
 
 #. Tools page row: %s is the version before the last update.
 #. printf format: keep every %... conversion, in the same order.
@@ -2800,3 +2930,54 @@ msgstr ""
 msgctxt "UI_LAUNCH_FOUND_FOLDER"
 msgid "folder"
 msgstr ""
+
+msgctxt "UI_LAUNCH_GPU_NONE"
+msgid "No graphics card here can run the game"
+msgstr "이 PC의 그래픽 카드로는 게임을 실행할 수 없습니다"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_OLD"
+msgid "%s: its driver offers %s, and the game needs Vulkan 1.3"
+msgstr "%s: 드라이버가 %s을(를) 제공하지만 게임에는 Vulkan 1.3이 필요합니다"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_EXT"
+msgid "%s (%s): its driver lacks %s, which the game needs"
+msgstr "%s (%s): 드라이버에 게임에 필요한 %s이(가) 없습니다"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_QUEUE"
+msgid "%s: it has no queue that does both graphics and compute"
+msgstr "%s: 그래픽과 연산을 동시에 처리하는 큐가 없습니다"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SKIPPED"
+msgid "%s: not the one chosen in Settings, Screen, Graphics card"
+msgstr "%s: 설정 > 화면 > 그래픽 카드에서 선택한 카드가 아닙니다"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SOFTWARE"
+msgid "%s draws on the processor, not on a graphics card: far too slow to play"
+msgstr "%s은(는) 그래픽 카드가 아니라 프로세서로 그립니다: 플레이하기에는 너무 느립니다"
+
+msgctxt "UI_LAUNCH_GPU_NO_DRIVER"
+msgid "No Vulkan driver was found."
+msgstr "Vulkan 드라이버를 찾지 못했습니다."
+
+msgctxt "UI_LAUNCH_GPU_HELP"
+msgid ""
+"The game needs Vulkan 1.3. On AMD and Intel that is Mesa 22.0 or newer, newer than Debian 11 and "
+"Ubuntu 20.04 ship; on NVIDIA, its driver 510 or newer. Some older graphics cards cannot have it "
+"at all. The setup can run now: the game starts once the driver is updated."
+msgstr ""
+"게임에는 Vulkan 1.3이 필요합니다. AMD와 Intel에서는 Mesa 22.0 이상으로, Debian 11과 Ubuntu 20.04에 포함된 것보다 새 버전입니다. "
+"NVIDIA에서는 드라이버 510 이상입니다. 일부 오래된 그래픽 카드는 아예 지원하지 않습니다. 설정은 지금 진행할 수 있으며, 드라이버를 업데이트하면 게임이 시작됩니다."
+
+msgctxt "UI_LAUNCH_GPU_HELP_WIN"
+msgid ""
+"The game needs Vulkan 1.3: install the latest driver from your graphics card's maker (AMD, Intel "
+"or NVIDIA; on NVIDIA, 510 or newer). Some older graphics cards cannot have it at all. The setup "
+"can run now: the game starts once the driver is updated."
+msgstr ""
+"게임에는 Vulkan 1.3이 필요합니다. 그래픽 카드 제조사(AMD, Intel 또는 NVIDIA)의 최신 드라이버를 설치하세요(NVIDIA는 510 이상). 일부 오래된 "
+"그래픽 카드는 아예 지원하지 않습니다. 설정은 지금 진행할 수 있으며, 드라이버를 업데이트하면 게임이 시작됩니다."

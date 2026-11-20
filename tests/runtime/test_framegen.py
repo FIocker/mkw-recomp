@@ -47,6 +47,7 @@ static int ov_movie_playing(void) { return movie; }
 static int rt_ab(void) { return 0; }
 static int rt_knob(const char *name, const char *def) { (void)name; return atoi(def); }
 static const char *cfg_get(const char *key) { (void)key; return NULL; }
+static int frame_logic_hz(void) { return 60; }
 """
 
 MAIN = r"""

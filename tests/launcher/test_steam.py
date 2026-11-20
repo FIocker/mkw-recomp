@@ -75,6 +75,106 @@ def test_add_creates_the_file(tmp_path: Path) -> None:
     assert [r["AppName"] for r in got] == [NAME]
 
 
+@pytest.mark.parametrize(
+    "data",
+    [b"\x00shortcuts\x00", b"\x00shortcuts\x00\x02appid\x00\x01"],
+    ids=["truncated-map", "truncated-integer"],
+)
+def test_add_reports_truncated_shortcuts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], data: bytes,
+) -> None:
+    config = tmp_path / "userdata/123/config"
+    config.mkdir(parents=True)
+    vdf = config / "shortcuts.vdf"
+    vdf.write_bytes(data)
+    monkeypatch.setattr(steam, "steam_dir", lambda: tmp_path)
+    monkeypatch.setattr(steam, "write_art", lambda *_: config / "icon.png")
+    monkeypatch.setattr(sys, "argv", ["steam.py", "add", "--name", NAME, "--exe", EXE, "--dir", "/games/mkw"])
+
+    with pytest.raises(SystemExit) as result:
+        steam.main()
+
+    assert result.value.code == 1
+    assert capsys.readouterr().out == "error io shortcuts.vdf contains incomplete or invalid Steam shortcut data\n"
+    assert vdf.read_bytes() == data
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("running", [False, True])
+def test_add_reports_partial_success_and_updates_healthy_profiles(tmp_path, monkeypatch, capsys, bad_first, running):
+    good, bad = tmp_path / "userdata/100", tmp_path / "userdata/200"
+    for profile in (good, bad):
+        (profile / "config").mkdir(parents=True)
+    damaged = bad / "config/shortcuts.vdf"
+    data = b"\x00shortcuts\x00"
+    damaged.write_bytes(data)
+    iterdir = Path.iterdir
+    order = [bad, good] if bad_first else [good, bad]
+
+    def list_profiles(path):
+        return iter(order) if path == tmp_path / "userdata" else iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", list_profiles)
+    monkeypatch.setattr(steam, "steam_dir", lambda: tmp_path)
+    monkeypatch.setattr(steam, "steam_running", lambda _: running)
+    monkeypatch.setattr(steam, "write_art", lambda *_: tmp_path / "icon.png")
+    monkeypatch.setattr(sys, "argv", ["steam.py", "add", "--name", NAME, "--exe", EXE, "--dir", "/games/mkw"])
+
+    steam.main()
+    assert capsys.readouterr().out == f"done 1 {int(running)} 1\n"
+    shortcuts = good / "config/shortcuts.vdf"
+    rows = steam.read_map(shortcuts.read_bytes(), 0)[0]["shortcuts"]
+    assert [entry["AppName"] for entry in rows.values()] == [NAME]
+    assert damaged.read_bytes() == data
+
+
+@pytest.mark.parametrize("userdata_kind", ["missing", "file", "empty", "denied"])
+def test_add_reports_unavailable_profiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], userdata_kind: str,
+) -> None:
+    userdata = tmp_path / "userdata"
+    if userdata_kind == "file":
+        userdata.touch()
+    elif userdata_kind in ("empty", "denied"):
+        userdata.mkdir()
+    if userdata_kind == "denied":
+        iterdir = Path.iterdir
+
+        def deny_userdata(path):
+            if path == userdata:
+                raise PermissionError("userdata access denied")
+            return iterdir(path)
+
+        monkeypatch.setattr(Path, "iterdir", deny_userdata)
+    monkeypatch.setattr(steam, "steam_dir", lambda: tmp_path)
+    monkeypatch.setattr(sys, "argv", ["steam.py", "add", "--name", NAME, "--exe", EXE, "--dir", "/games/mkw"])
+
+    with pytest.raises(SystemExit) as exited:
+        steam.main()
+
+    assert exited.value.code == 1
+    want = "error io userdata access denied\n" if userdata_kind == "denied" else "error nosteam\n"
+    assert capsys.readouterr().out == want
+
+
+def test_add_uses_only_profile_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    userdata = tmp_path / "userdata"
+    for profile in ("0", "123", "other"):
+        (userdata / profile).mkdir(parents=True)
+    (userdata / "456").touch()
+    monkeypatch.setattr(steam, "steam_dir", lambda: tmp_path)
+    monkeypatch.setattr(steam, "steam_running", lambda _: False)
+    monkeypatch.setattr(steam, "write_art", lambda grid, *_: grid / "icon.png")
+    monkeypatch.setattr(sys, "argv", ["steam.py", "add", "--name", NAME, "--exe", EXE, "--dir", "/games/mkw"])
+
+    steam.main()
+
+    assert capsys.readouterr().out == "done 1 0\n"
+    assert list(userdata.rglob("shortcuts.vdf")) == [userdata / "123/config/shortcuts.vdf"]
+
+
 def test_no_steam_pid_is_not_running(tmp_path: Path) -> None:
     # a pid file that is not there (or is not a number) reads as Steam closed, never as an error
     if os.name == "nt":

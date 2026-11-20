@@ -45,6 +45,10 @@ void opt_end(void);
 void opt_reserve_bottom(float h);
 // The next page's first row takes the controller's cursor (opening the menu, switching tabs).
 void opt_focus_first(void);
+// "Continue" / "Quit game" (the menu's bottom row, outside any page) have the cursor: the description pane shows
+// nothing instead of falling back to a setting row's text. Set every frame before the page's opt_begin, from last
+// frame's buttons; a hovered or selected row still wins.
+void opt_hide_desc(bool hide);
 // The row of key (or button id) takes the cursor, scrolled into view, when it is next drawn.
 void opt_focus_key(const char *key);
 // The next row is greyed out like one the environment fixes, with note under its label and in its description.
@@ -61,13 +65,14 @@ void opt_text(UiTextId text, bool warn = false);
 bool opt_toggle(const char *key, UiTextId label, UiTextId desc, bool inverted = false);
 // One name per value of the key's cfg_meta values list, in its order. When the key has no fixed default (an empty
 // def), names[0] is the automatic choice (the key unset) and names[1..] follow the values. note: a short line under
-// the value in place of the "default" mark (NULL: none).
+// the value in place of the "default" mark (NULL: none). desc_note: a dim line under the description (NULL: none).
 bool opt_choice(const char *key, UiTextId label, const UiTextId *names, int n, UiTextId desc,
-                const char *note = nullptr);
+                const char *note = nullptr, const char *desc_note = nullptr);
 // A choice over a list the caller builds (devices, window sizes): values[i] is written, names[i] shown; "" means the key
 // unset. cur: the index in effect, -1 to find cfg_value(key) in values (no match: the value shown as it is).
+// desc_note as opt_choice's.
 bool opt_choice_list(const char *key, UiTextId label, const char *const *values, const char *const *names, int n,
-                     UiTextId desc, int cur = -1, const char *note = nullptr);
+                     UiTextId desc, int cur = -1, const char *note = nullptr, const char *desc_note = nullptr);
 // A row that runs an action: true on A or a click. id: unique on the page and not a setting ("##copy_info"); value:
 // shown on the right ("" none).
 bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value = "");

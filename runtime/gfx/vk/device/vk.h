@@ -188,6 +188,7 @@ void vk_fg_release(void);   // before the device goes away
 void vk_queue_lock(void);
 void vk_queue_unlock(void);
 void vk_sync_parts_flush(void);   // queue lock held: the parts waiting for the submit thread to the queue (vk_sync.c)
+struct PlatThread *vk_sync_submit_thread(void);   // the thread "vk submit" once started, else NULL (vk_sync.c)
 // Copy of the last presented swapchain image, for probes: on, the next presents read the image back into a host buffer
 // and wait for the GPU. *px stays valid until the next present; the format is the swapchain's. Returns 0 with no frame.
 // The rectangle {x, y, w, h} of a dw x dh swapchain image a cw x ch picture is presented in (gfx_present.c,
@@ -330,12 +331,19 @@ void vk_mem_lost_watch(const void *pool, uint64_t addr, uint64_t size, uint32_t 
 void vk_mem_lost_log(uint64_t frame);
 void vk_mem_gpu_pending(uint64_t addr, uint64_t size);
 void vk_gpu_written(uint64_t addr, uint64_t size);
+uint64_t vk_merge_back_probe(int runs, int cw, uint64_t addr, uint64_t size, const uint8_t *s, const uint8_t *base,
+                             uint64_t *gpu);   // --probe-merge: one write-back by either implementation (vk_mem_merge.c)
 int vk_mem_mirror_probe(uint64_t addr);   // --probe-vkexec: the pool at addr gets its mirror as on a first buffer use;
                                           // 1 when it has one
 void vk_mem_class_log(const VkPhysicalDeviceProperties *p, const VkPhysicalDeviceMemoryProperties *m);   // once
 void vk_mem_census(uint64_t frame);               // at each present: pool census and traffic, logged at frame 1800 and,
                                                   // with MKW_TRACE=perf, every 1800 frames
 void vk_mem_replay_log(uint64_t frames);          // a capture replay's end: the mirror and shadow summaries over its frames
+// MKW_MEM_POOL_LABELS=1 (vk_mem_pooldiag.c): the game's pool pages in RAM beside their copies, and the runtime's reads
+// of CPU_NO_ACCESS pool storage (what: 0 shadow fill, 1 texture upload, 2 fence write-back)
+int vk_pool_diag_on(void);
+void vk_pool_diag_note(uint32_t flags, int what, uint64_t bytes);
+void vk_pool_diag_log(uint64_t frame);
 // VRAM in use and its budget, summed over the DEVICE_LOCAL heaps. exact 1: VK_EXT_memory_budget (the whole process),
 // 0: this allocator's own allocations against the heap sizes. 0 when unknown.
 int vk_mem_vram(uint64_t *used, uint64_t *budget, int *exact);
@@ -469,6 +477,8 @@ typedef struct {
     uint8_t bound;                 // aliases physical-pool memory (physical and virtual pools)
     uint8_t block_views;           // BC image that renders through uncompressed views of its blocks (BLOCK_TEXEL_VIEW_
                                    // COMPATIBLE + EXTENDED_USAGE: only those views may use COLOR_ATTACHMENT)
+    uint8_t block_ca_skipped;      // the GFX9 guard (vk_tex_gfx9.c) left this 3D BC volume without that usage: it does
+                                   // not crash addrlib, and a draw into it writes nothing (vk_exec_rt.c logs it)
     uint8_t swz[4];               // NVN texture swizzle selectors (nvnTextureBuilderSetSwizzle); a view swizzle replaces them
     uint8_t fb_usage;              // created with ATTACHMENT_FEEDBACK_LOOP usage (VK_FEEDBACK_LAYOUT, attachable images)
     uint8_t listed;                // a render target whose MUTABLE_FORMAT lists its views' formats: format and twin

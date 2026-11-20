@@ -25,6 +25,9 @@
 #include "ui/menu/menu.h"
 #include "vk.h"
 #include "platform/platform.h"
+#ifdef __linux__
+#include "linux_power.h"
+#endif
 
 enum { STICK_MAX = 32767, STICK_DIR = 16384, TRIGGER_ON = 16384, RESCAN_MS = 1000 };
 
@@ -383,10 +386,11 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
     script_apply(&b, sl, sr, 0);
     skip_input(&b);
     rec_apply(b, sl, sr);
-    // Minus and Plus held together (gamepad or keys) open or close the menu and never reach the game
+    // The menu shortcut (gamepad or keys) opens or closes the menu and never reaches the game
     static int combo_held;
     int32_t st[4] = {sl[0], sl[1], sr[0], sr[1]};
-    int toggle = input_menu_gate(&combo_held, menu_is_open(), &b, st);
+    int guide = state == 1 && pad && SDL_GamepadConnected(pad) && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_GUIDE);
+    int toggle = input_menu_gate(&combo_held, menu_is_open(), &b, st, guide);
     static int overlay_held;   // L3+R3 step the performance overlay (F10)
     int overlay = input_overlay_gate(&overlay_held, &b);
     sl[0] = st[0], sl[1] = st[1], sr[0] = st[2], sr[1] = st[3];
@@ -566,6 +570,22 @@ int input_pad_power_sdl(int player, char *name, size_t name_size, uint32_t *id, 
     plat_mutex_unlock(&lock);
     return st;
 }
+
+#ifdef __linux__
+// The player's order among Xbox-named gamepads (linux_power.c reads the Nth Xbox sysfs supply for it, so pads of
+// other makes in earlier slots must not shift the index). Under `lock`, like every SDL gamepad call.
+int input_pad_xbox_index(int player) {
+    int n = 0;
+    plat_mutex_lock(&lock);
+    if (state == 1)
+        for (int q = 0; q < player && q < INPUT_MAX_PLAYERS; q++) {
+            SDL_Gamepad *g = q ? extra[q] : pad;
+            if (g && SDL_GamepadConnected(g) && linux_power_is_xbox(SDL_GetGamepadName(g))) n++;
+        }
+    plat_mutex_unlock(&lock);
+    return n;
+}
+#endif
 
 int input_rumble_triggers_enabled(void) {
     return cfg_bool("MKW_RUMBLE_TRIGGERS");

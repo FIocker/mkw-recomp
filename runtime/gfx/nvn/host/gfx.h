@@ -63,6 +63,10 @@ const uint8_t *gfx_shader_input_id(const GfxShader *s);     // the 32-byte id in
 const GfxShader *gfx_shader_load_input(const uint8_t iid[32]);
 // Boot prewarm of the pipeline key records' shaders into out[i]; off with prepared SPIR-V (all NULL, gfx_shader.c).
 void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **out);
+// Every program of spirv/shaders.pack loaded on a thread of its own, while the boot prewarm creates the device; join
+// before the next gfx_shader_prewarm (one at a time). start returns NULL when there is no pack or no thread.
+struct PlatThread *gfx_shader_preload_start(void);
+void gfx_shader_preload_join(struct PlatThread *t);
 const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words);
 uint64_t gfx_shader_spirv_fnv(const GfxShader *s);          // FNV-1a 64 of the SPIR-V bytes, kept on the shader
 // The calling thread's reads of SPIR-V are the prewarm's (1) or a use (0, the default): only a use keeps a shader's

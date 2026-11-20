@@ -982,6 +982,60 @@ BROWSER = {
 for _ctx, _langs in BROWSER.items():
     T.setdefault(_ctx, {}).update(_langs)
 
+# The NSFW-mods choice of the GameBanana tab (11/2026)
+NSFW = {
+    "UI_GB_RATED": {
+        "ca": "Contingut: %s", "de": "Inhaltsbewertung: %s", "fr": "Contenu : %s",
+        "es": "Contenido: %s", "es-419": "Contenido: %s",
+        "it": "Contenuto: %s", "pt": "Conteúdo: %s",
+        "pt-BR": "Conteúdo: %s", "nl": "Contentwaardering: %s",
+        "ru": "Рейтинг контента: %s", "ja": "コンテンツレーティング: %s",
+        "ko": "콘텐츠 등급: %s", "zh-Hans": "内容分级：%s",
+        "zh-Hant": "內容分級：%s", "gl": "Contido: %s",
+        "eu": "Edukia: %s", "pl": "Ocena treści: %s",
+        "tr": "İçerik derecesi: %s", "uk": "Рейтинг контенту: %s",
+        "th": "เรตติ้งเนื้อหา: %s",
+    },
+    "UI_GB_MATURE": {
+        "ca": "Mods NSFW", "de": "NSFW-Mods", "fr": "Mods NSFW",
+        "es": "Mods NSFW", "es-419": "Mods NSFW",
+        "it": "Mod NSFW", "pt": "Mods NSFW",
+        "pt-BR": "Mods NSFW", "nl": "NSFW-mods",
+        "ru": "NSFW-моды", "ja": "NSFW MOD",
+        "ko": "NSFW 모드", "zh-Hans": "NSFW 模组",
+        "zh-Hant": "NSFW 模組", "gl": "Mods NSFW",
+        "eu": "NSFW modak", "pl": "Mody NSFW",
+        "tr": "NSFW modlar", "uk": "NSFW-моди",
+        "th": "ม็อด NSFW",
+    },
+    "UI_GB_MATURE_OBFUSCATE": {
+        "ca": "Difuminar", "de": "Verschleiern", "fr": "Flouter",
+        "es": "Difuminar", "es-419": "Difuminar",
+        "it": "Sfocare", "pt": "Desfocar",
+        "pt-BR": "Desfocar", "nl": "Vervagen",
+        "ru": "Размыть", "ja": "ぼかす",
+        "ko": "가리기", "zh-Hans": "打码",
+        "zh-Hant": "打碼", "gl": "Difuminar",
+        "eu": "Lausotu", "pl": "Zamazać",
+        "tr": "Sansürle", "uk": "Розмити",
+        "th": "เซ็นเซอร์",
+    },
+    "UI_GB_MATURE_SHOW": {
+        "ca": "Mostra", "de": "Zeigen", "fr": "Afficher",
+        "es": "Mostrar", "es-419": "Mostrar",
+        "it": "Mostra", "pt": "Mostrar",
+        "pt-BR": "Mostrar", "nl": "Tonen",
+        "ru": "Показать", "ja": "表示",
+        "ko": "표시", "zh-Hans": "显示",
+        "zh-Hant": "顯示", "gl": "Mostrar",
+        "eu": "Erakutsi", "pl": "Pokaż",
+        "tr": "Göster", "uk": "Показати",
+        "th": "แสดง",
+    },
+}
+for _ctx, _langs in NSFW.items():
+    T.setdefault(_ctx, {}).update(_langs)
+
 # The start screen's notice about how the last game ended (ui/launcher/launcher_lastrun.cpp, 14/11/2026).
 LASTRUN = {
     "UI_LAUNCH_LASTRUN_KNOWN": {
@@ -1073,6 +1127,55 @@ LASTRUN = {
 }
 for _ctx, _langs in LASTRUN.items():
     T.setdefault(_ctx, {}).update(_langs)
+
+
+# The manual update check's "no newer version" line (11/2026)
+T.setdefault("UI_TOOLS_UPDATE_CURRENT", {}).update({
+    "ca": "Tens l'última versió.", "de": "Du bist auf dem neuesten Stand.", "fr": "Vous êtes à jour.",
+    "es": "Estás al día.", "es-419": "Estás al día.", "it": "Sei aggiornato.",
+    "pt": "Estás atualizado.", "pt-BR": "Você está atualizado.", "nl": "Je bent up-to-date.",
+    "ru": "У вас последняя версия.", "ja": "最新の状態です。", "ko": "최신 버전입니다.",
+    "zh-Hans": "已是最新版本。", "zh-Hant": "已是最新版本。", "gl": "Tes a última versión.",
+    "eu": "Azken bertsioa duzu.", "pl": "Masz najnowszą wersję.", "tr": "Güncelsiniz.",
+    "uk": "У вас остання версія.", "th": "คุณใช้เวอร์ชันล่าสุดแล้ว",
+})
+
+
+# Add to Steam's partial result: only some profiles could be updated (11/2026); keep %d %d in order
+T.setdefault("UI_TOOLS_STEAM_PARTIAL", {}).update({
+    "ca": "S'han actualitzat %d de %d perfils de Steam", "de": "%d von %d Steam-Profilen aktualisiert",
+    "fr": "%d profils Steam sur %d mis à jour", "es": "Actualizados %d de %d perfiles de Steam",
+    "es-419": "Se actualizaron %d de %d perfiles de Steam", "it": "Aggiornati %d profili Steam su %d",
+    "pt": "Atualizados %d de %d perfis do Steam", "pt-BR": "%d de %d perfis do Steam atualizados",
+    "nl": "%d van %d Steam-profielen bijgewerkt", "ru": "Обновлено профилей Steam: %d из %d",
+    "ja": "Steam プロフィールを %d/%d 件更新しました", "ko": "Steam 프로필 %d/%d개 업데이트됨",
+    "zh-Hans": "已更新 %d/%d 个 Steam 用户配置", "zh-Hant": "已更新 %d/%d 個 Steam 使用者設定檔",
+    "gl": "Actualizados %d de %d perfís de Steam", "eu": "Steam-en %d profil eguneratu dira %d-tik",
+    "pl": "Zaktualizowano %d z %d profili Steam", "tr": "%d / %d Steam profili güncellendi",
+    "uk": "Оновлено профілів Steam: %d з %d", "th": "อัปเดตโปรไฟล์ Steam แล้ว %d จาก %d",
+})
+T.setdefault("UI_TOOLS_STEAM_PARTIAL_RESTART", {}).update({
+    "ca": "S'han actualitzat %d de %d perfils de Steam. Reinicia Steam per veure l'accés directe.",
+    "de": "%d von %d Steam-Profilen aktualisiert. Starte Steam neu, um die Verknüpfung zu sehen.",
+    "fr": "%d profils Steam sur %d mis à jour. Redémarrez Steam pour voir le raccourci.",
+    "es": "Actualizados %d de %d perfiles de Steam. Reinicia Steam para ver el acceso directo.",
+    "es-419": "Se actualizaron %d de %d perfiles de Steam. Reinicia Steam para ver el acceso directo.",
+    "it": "Aggiornati %d profili Steam su %d. Riavvia Steam per vedere il collegamento.",
+    "pt": "Atualizados %d de %d perfis do Steam. Reinicia o Steam para ver o atalho.",
+    "pt-BR": "%d de %d perfis do Steam atualizados. Reinicie o Steam para ver o atalho.",
+    "nl": "%d van %d Steam-profielen bijgewerkt. Herstart Steam om de snelkoppeling te zien.",
+    "ru": "Обновлено профилей Steam: %d из %d. Перезапустите Steam, чтобы увидеть ярлык.",
+    "ja": "Steam プロフィールを %d/%d 件更新しました。ショートカットを表示するには Steam を再起動してください。",
+    "ko": "Steam 프로필 %d/%d개 업데이트됨. 바로가기를 보려면 Steam을 다시 시작하세요.",
+    "zh-Hans": "已更新 %d/%d 个 Steam 用户配置。请重启 Steam 以查看快捷方式。",
+    "zh-Hant": "已更新 %d/%d 個 Steam 使用者設定檔。請重新啟動 Steam 以查看捷徑。",
+    "gl": "Actualizados %d de %d perfís de Steam. Reinicia Steam para ver o atallo.",
+    "eu": "Steam-en %d profil eguneratu dira %d-tik. Berrabiarazi Steam lasterbidea ikusteko.",
+    "pl": "Zaktualizowano %d z %d profili Steam. Uruchom Steam ponownie, aby zobaczyć skrót.",
+    "tr": "%d / %d Steam profili güncellendi. Kısayolu görmek için Steam'i yeniden başlatın.",
+    "uk": "Оновлено профілів Steam: %d з %d. Перезапустіть Steam, щоб побачити ярлик.",
+    "th": "อัปเดตโปรไฟล์ Steam แล้ว %d จาก %d รีสตาร์ท Steam เพื่อดูทางลัด",
+})
 
 
 def main():

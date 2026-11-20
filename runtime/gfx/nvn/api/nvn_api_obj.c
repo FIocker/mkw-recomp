@@ -653,9 +653,9 @@ NVN_API(nvnWindowSetCrop) {
 }
 
 // ---------- Present pacing
-// The vsync thread ticks at a fixed 60 Hz whatever the monitor does, so one game frame lasts `interval` ticks; the turbo
-// (core/hacks/turbo.c) makes them `turbo_speed` times shorter.
-uint64_t gfx_vsync_tick_ns(void);   // gfx_present.c: 60 Hz, or locked to the display's refresh
+// The vsync thread ticks at a fixed rate whatever the monitor does (60 Hz, MKW_LOGIC_HZ), so one game frame lasts
+// `interval` ticks; the turbo (core/hacks/turbo.c) makes them `turbo_speed` times shorter.
+uint64_t gfx_vsync_tick_ns(void);   // gfx_present.c: 1/MKW_LOGIC_HZ s, or locked to the display's refresh
 int64_t gfx_pace_nudge_take(void);   // gfx_present.c: a move of the present phase to make, once
 static uint64_t present_period(const win_t *o) {
     return (o->interval > 0 ? (uint64_t)o->interval : 1ull) * gfx_vsync_tick_ns() / (uint64_t)turbo_speed();

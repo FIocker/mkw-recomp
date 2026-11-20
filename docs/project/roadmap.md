@@ -18,7 +18,8 @@ to one slow piece but to a chain where each step waits for the previous one (mea
 The game's big submit only reaches the back end at the end of its frame, and the GPU cannot start until it is
 recorded, so recording is on the critical path: every millisecond saved there is a millisecond off the frame, down to
 ~21 ms, where the GPU (busy ~20 ms) takes over. Spreading the same CPU work over more threads does not help by
-itself; recording with less CPU does. Already done: recordings reused across frames (−4.3 ms), recording overlapped
+itself; recording with less CPU does. Tried and dropped: reusing a draw's recording across frames (same image, but
++4.3 ms of CPU a frame: the draws that repeat are already the cheap ones). Already done: recording overlapped
 with the game (−2.4 ms), submits on their own thread (−1.2 to −1.6 ms), the shadow copies off the replay thread
 (−0.8 ms), the replay thread on its own core (−1.1 ms), dynamic state recorded only when it changes (idea from
 totk-pc-recomp, MIT; −10.6 % recorder instructions on Steam Deck; no measurable frame-time change). Next:
@@ -35,6 +36,11 @@ totk-pc-recomp, MIT; −10.6 % recorder instructions on Steam Deck; no measurabl
   it on and off, and its binds made ~20 % more descriptor work (sets are allocated) (16/11/2026); left for slower CPUs.
 - **Recording in parallel**: chunks of a submit on several threads; today they fight over the texture lock, which has
   to be split first.
+- **The fence's completion work**: before the game is released for the next frame, the completion thread writes back
+  what the GPU wrote into guest memory (`merge_back`, `MKW_WB_CENSUS`): 2.6 ms of a 2-player race frame on an
+  i7-14700F. Compared 64 bytes at a time with AVX2 (`MKW_MERGE_SIMD`), 1.5-1.7 ms, and the waiters released 1.0 ms
+  sooner (in-run A/B and its inverted twin, 18/11/2026; the frame −0.5 ms, at the 60 fps cap). Left: the 1-4 MiB
+  ranges the GPU leaves alone (~0.5 ms a frame of `memcmp`), and the rest could run on other threads.
 - **The kernel's global lock**: waits by address are done (−1.3 ms\*); the rest of the lock remains.
 - **Hybrid CPUs** (`MKW_FAST_CORES`, #490 by @AngeloAscheri): on Linux the frame's threads stay on the fast cores
   and background work (pipeline builds, prewarming, video) on all of them; on an i7-14700F at a fixed 60 fps, races
@@ -44,8 +50,10 @@ totk-pc-recomp, MIT; −10.6 % recorder instructions on Steam Deck; no measurabl
     per-thread placement (CPU Sets, or each frame thread's own mask) and then the same A/B on a hybrid CPU.
   - **Few P-cores**: on by default only with 8 fast processors left besides the replay core, a hypothesis; no CPU
     with 2-4 P-cores (i5-1235U, Lunar Lake, Ryzen AI 9 HX 370) has been measured either way.
-  - `vk submit` and `vk present` start on the replay thread after it pins itself and share its processor: their own
-    A/B.
+  - `vk submit` and `vk present` started on the replay thread after it pinned itself and shared its processor; now
+    with the frame's threads (`MKW_SUBMIT_APART`): a part waits 11-13 us for its `vkQueueSubmit2` instead of 34-39,
+    and the replay thread sends 1.5-2.3 % of the parts itself instead of 9-10 % (in-run A/B and its inverted twin,
+    i7-14700F, 18/11/2026). The frame the same there, at the 60 fps cap; a CPU-bound machine (the 660M) to measure.
 
   A warning for whoever measures this (16/11/2026): every race up to 17:31 took 38-41 ms a frame and every one from
   17:33 on 19-22 ms, with no change to the code; that was the GPU clock (the item above), and comparing a `taskset`
@@ -92,8 +100,11 @@ screen by screen against the console.
   (`tex_bl_copy`) runs at memcpy speed (16-25 GB/s, 9.6 for a 16 MiB BC7 level), so on the GPU it only pays if the
   GPU reads the storage from its mirror without a CPU copy. In the course load's peak (1.5 s, user call graphs of the
   replay thread, tl-fp1) the replay spent ~66 ms in the BC1/BC7 choice for ASTC textures (`astc_alpha_one`, at image
-  creation) and ~44 ms in the deswizzle, both serial on the critical path; spreading them over worker threads is the
-  cheaper step.
+  creation) and ~44 ms in the deswizzle, both serial on the critical path. Both are now spread over the texture
+  workers (`tex_par.c`, `MKW_TEX_PAR`): in a Grand Prix run from boot to the race, at the same 3 328 images, the scan
+  took 215 -> 138 ms of the replay thread and the deswizzle of textures of 512 KiB or more 139 -> 77 ms (i7-14700F,
+  17/11/2026, two runs). Left: the deswizzle of the smaller ones (~85 ms over ~9 000 uploads of ~140 KiB), too small
+  to wake the workers for each; it needs uploads batched before they are split.
 - A Linux package that starts on non-rolling distributions (glibc 2.31 through zig), and the launcher tested on real
   Windows machines.
 - Windows with a dedicated GPU: memory the GPU wrote is not uploaded again to its mirror.

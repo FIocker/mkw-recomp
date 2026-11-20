@@ -64,6 +64,7 @@ void vk_mem_replay_log(uint64_t frames) {
 void vk_mem_census(uint64_t frame) {
     static uint64_t window_start;
     mem_early_log(frame);   // MKW_EARLY_READ
+    if (frame % 300 == 0) vk_pool_diag_log(frame);   // MKW_MEM_POOL_LABELS
     uint64_t every = vram_every();
     if (((rt_trace & RT_TRACE_PERF) && frame % 150 == 0) || (every && frame % every == 0)) vram_log(frame);
     if (vk_dirty_census && !vk_mirror_on) dirty_frame(frame);
@@ -91,10 +92,11 @@ void vk_mem_census(uint64_t frame) {
         total[r->kind] += r->size, count[r->kind]++;
     }
     plat_mutex_unlock_shared(&pool_lock);
-    rt_log("mem: census at frame %llu: import %llu pools %.1f MiB (%d without a GPU buffer), physical %llu pools %.1f MiB, "
+    rt_log("mem: census at frame %llu: import %llu pools %.1f MiB (%d backing failures so far), physical %llu pools %.1f MiB, "
            "virtual %llu pools %.1f MiB of address space",
            (unsigned long long)frame, (unsigned long long)count[POOL_IMPORT], total[POOL_IMPORT] / 1048576.0,
-           n_import_failures, (unsigned long long)count[POOL_PHYS], total[POOL_PHYS] / 1048576.0,
+           __atomic_load_n(&n_import_failures, __ATOMIC_RELAXED), (unsigned long long)count[POOL_PHYS],
+           total[POOL_PHYS] / 1048576.0,
            (unsigned long long)count[POOL_VIRT], total[POOL_VIRT] / 1048576.0);
     static const char *const kinds[] = {"", "import", "physical", "virtual"};
     for (int j = 0; j < ng; j++) {

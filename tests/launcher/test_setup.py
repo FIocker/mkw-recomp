@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,7 +39,43 @@ def test_cc_survives_spaces(tmp_path: Path) -> None:
 
 def run_prepare(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, "-I", str(ROOT / "tools/prepare/prepare.py"), *args],
-                          capture_output=True, text=True, timeout=60)  # fmt: skip
+                          capture_output=True, text=True, encoding="utf-8", timeout=60)  # fmt: skip
+
+
+@pytest.mark.parametrize("name", ["Plain", "Café", "玩家"])
+def test_moved_source_event_uses_utf8(tmp_path: Path, name: str) -> None:
+    gone = tmp_path / name
+    state = {"version": 1, "done": {}, "source": str(gone), "romfs_mode": "link"}
+    (tmp_path / "setup-state.json").write_text(json.dumps(state), encoding="utf-8")
+    # The launcher uses -I, so model the Windows pipe's encoding inside the child.
+    driver = ("import runpy,sys; sys.stdout.reconfigure(encoding='cp1252'); "
+              "sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name='__main__')")
+    p = subprocess.run([sys.executable, "-I", "-c", driver, str(ROOT / "tools/prepare/prepare.py"),
+                        "--game", str(tmp_path)], capture_output=True, timeout=60)  # fmt: skip
+    assert p.returncode == 1
+    assert p.stdout.decode("utf-8").splitlines() == [f"error moved {gone}"]
+    assert f"error moved {gone}" in (tmp_path / "logs/setup.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("state", [[], {"done": None}, {"done": {"exefs": 42}}])
+@pytest.mark.parametrize("location", ["live", "resume", "promote"])
+def test_malformed_setup_state(tmp_path: Path, state, location: str) -> None:
+    live = tmp_path / "mkwgame.dll"
+    live.write_bytes(b"played library")
+    staged = tmp_path / "setup-next"
+    staged.mkdir()
+    (staged / live.name).write_bytes(b"staged library")
+    if isinstance(state, dict):
+        state = dict(state, version=prepare.PREP_VERSION, ready=True, port="0.1.16")
+    folder = tmp_path if location == "live" else staged
+    (folder / "setup-state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    args = ["--game", str(tmp_path), "--port", "0.1.16"]
+    if location == "resume":
+        args.append("--next")
+    p = run_prepare(*args)
+    assert live.read_bytes() == b"played library"
+    assert p.returncode == 2 and p.stdout.strip() == "error source no earlier setup in this folder", p.stdout + p.stderr
 
 
 @pytest.mark.parametrize("external", [False, True])
@@ -174,6 +211,51 @@ def test_fetch_update_package(
         assert not (dest / "new").exists()
         if os.name != "nt":
             assert out.stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.parametrize("failure", ["incomplete", "reset"])
+def test_fetch_interrupted_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: str,
+) -> None:
+    import hashlib
+    import http.client
+    import io
+
+    first, last = b"first chunk", b"last chunk"
+
+    class InterruptedResponse(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            if self.tell() == 0:
+                return super().read(size)
+            if failure == "incomplete":
+                raise http.client.IncompleteRead(b"", len(last))
+            raise ConnectionResetError("connection reset")
+
+    asset = {
+        "name": "mkw-recomp-v9.8.7-x86_64.AppImage",
+        "size": len(first + last),
+        "digest": "sha256:" + hashlib.sha256(first + last).hexdigest(),
+        "browser_download_url": "https://example.invalid/download",
+    }
+    monkeypatch.setattr(update, "latest_asset", lambda _: ("v9.8.7", asset))
+    monkeypatch.setattr(update, "get", lambda *_: InterruptedResponse(first))
+    monkeypatch.setattr(sys, "argv", ["update.py", "fetch", "--os", "linux", "--tag", "v9.8.7", "--dest", str(tmp_path)])
+
+    with pytest.raises(SystemExit) as exited:
+        update.main()
+
+    assert exited.value.code == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"progress {len(first)} {asset['size']}"
+    assert len(lines) == 2 and lines[1].startswith("error fetch ")
+    assert not list(tmp_path.iterdir())
+
+    monkeypatch.setattr(update, "get", lambda *_: io.BytesIO(first + last))
+    update.main()
+    out = tmp_path / asset["name"]
+    assert out.read_bytes() == first + last
+    assert capsys.readouterr().out.splitlines()[-1] == f"ready {out.resolve()}"
+    assert list(tmp_path.iterdir()) == [out]
 
 
 def test_romfs_version_matches_main() -> None:
@@ -451,6 +533,120 @@ def test_copy_removes_other_versions_files(tmp_path: Path) -> None:
     assert (dst / "UI/Product_180.sarc.zs").is_file()
 
 
+def test_copy_keeps_installed_files_when_source_scan_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import gamecopy
+
+    src, dst = tmp_path / "dump", tmp_path / "install"
+    blocked = src / "sub"
+    installed = dst / "sub/file.bin"
+    blocked.mkdir(parents=True)
+    installed.parent.mkdir(parents=True)
+    (blocked / "file.bin").write_bytes(b"new version")
+    installed.write_bytes(b"old version")
+    stale = dst / "stale.bin"
+    stale.write_bytes(b"stale")
+    scandir = os.scandir
+
+    def fail_subdirectory(path):
+        if Path(path) == blocked:
+            raise PermissionError("can't scan source subdirectory")
+        return scandir(path)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(os, "scandir", fail_subdirectory)
+        with pytest.raises(PermissionError, match="can't scan source subdirectory"):
+            gamecopy.copy_tree(src, dst, 1, "1.8.0", verify_existing=True)
+
+    assert installed.read_bytes() == b"old version"
+    assert stale.is_file()
+    gamecopy.copy_tree(src, dst, 1, "1.8.0", verify_existing=True)
+    assert installed.read_bytes() == b"new version"
+    assert not stale.exists()
+
+
+@pytest.fixture
+def loose_romfs_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Callable[[str], None]]:
+    game = tmp_path / "PC installation"
+    game.mkdir()
+    for version, data in (("1.0.0", b"old!"), ("1.8.0", b"new!")):
+        src = tmp_path / version
+        (src / "exefs").mkdir(parents=True)
+        (src / "exefs/main").write_bytes(b"synthetic header")
+        (src / "romfs").mkdir()
+        for name in ("shared.bin", "second.bin", version):
+            (src / "romfs" / name).write_bytes(data)
+
+    monkeypatch.setattr(prepare, "STEPS", ("check", "exefs", "romfs"))
+    monkeypatch.setattr(prepare, "own_children", lambda: None)
+    monkeypatch.setattr(prepare.update, "ca_file", lambda: None)
+    monkeypatch.setattr(prepare.build, "game_id", lambda: "synthetic")
+    # setup.lock is held until the process ends; here every run shares this process, and a run that exits early leaves
+    # its open lock file in the SystemExit traceback pytest.raises keeps, so the next run would wait for it forever
+    monkeypatch.setattr(prepare, "hold_lock", lambda _game: None)
+
+    def check(src: Path, *_: Path) -> tuple[Path, Path, SimpleNamespace]:
+        return src / "exefs", src / "romfs", SimpleNamespace(name=src.name, romfs_files=3)
+
+    monkeypatch.setattr(prepare, "check", check)
+
+    def run(version: str) -> None:
+        log = game / "logs/setup.log"
+        log.parent.mkdir(exist_ok=True)
+        with log.open("w", encoding="utf-8") as log_stream, monkeypatch.context() as patch:
+            patch.setattr(sys, "stderr", log_stream)
+            patch.setattr(sys, "argv", ["prepare.py", "--source", str(tmp_path / version), "--game", str(game),
+                                        "--romfs", "copy", "--jobs", "1"])
+            prepare.main()
+
+    return game / "romfs", run
+
+
+def test_loose_romfs_replaces_same_size_files_when_switching_versions(loose_romfs_setup) -> None:
+    romfs, run = loose_romfs_setup
+    run("1.0.0")
+    run("1.8.0")
+
+    assert (romfs / "shared.bin").read_bytes() == b"new!"
+    assert not (romfs / "1.0.0").exists()
+    assert (romfs / "1.8.0").exists()
+
+
+@pytest.mark.parametrize("recovery", ["first-copy", "retry-switch", "return-to-old"])
+def test_interrupted_loose_romfs_copy(loose_romfs_setup, monkeypatch: pytest.MonkeyPatch, recovery: str) -> None:
+    romfs, run = loose_romfs_setup
+    if recovery != "first-copy":
+        run("1.0.0")
+    copyfile = shutil.copyfile
+
+    def interrupt(source: Path, target: Path) -> Path:
+        if source.name == "second.bin":
+            raise OSError("simulated interrupted copy")
+        return copyfile(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(shutil, "copyfile", interrupt)
+        with pytest.raises(SystemExit) as failed:
+            run("1.8.0")
+        assert failed.value.code == 1
+
+    shared = romfs / "shared.bin"
+    assert shared.read_bytes() == b"new!"
+    os.utime(shared, (1_700_000_000, 1_700_000_000))
+    timestamp = shared.stat().st_mtime_ns
+    if recovery == "return-to-old":
+        run("1.0.0")
+        assert shared.read_bytes() == (romfs / "second.bin").read_bytes() == b"old!"
+        assert not (romfs / "1.8.0").exists()
+    else:
+        run("1.8.0")
+        assert (romfs / "second.bin").read_bytes() == b"new!"
+        assert shared.stat().st_mtime_ns == timestamp
+
+
 def test_package_has_the_launchers_tools() -> None:
     # every script the start screen runs (setup_tool(exe_dir, "mod/import.py", ...)) is copied into the package by
     # tools/build/dist.py's SOURCES: until 13/11/2026 tools/mod was not, and the Mods page said "no setup tools"
@@ -464,6 +660,11 @@ def test_package_has_the_launchers_tools() -> None:
     for cpp in (ROOT / "runtime/ui/launcher").glob("*.cpp"):
         wanted |= set(re.findall(r'setup_tool\([^,]+, "([^"]+)"', cpp.read_text(encoding="utf-8")))
     assert wanted - {"prepare/prepare.py"}, "no setup_tool calls found: the pattern is stale"
+    # and every tool prepare.py runs by its path (ROOT / "tools/....py"): until 18/11/2026 shaderstep.py ran
+    # tools/shaders/pipeline_pairs.py, which no package carried, and every setup from main failed at its shaders
+    for py in (ROOT / "tools/prepare").glob("*.py"):
+        found = re.findall(r'ROOT / "tools/([^"]+\.py)"', py.read_text(encoding="utf-8"))
+        wanted |= set(found)
     for rel in sorted(wanted):
         path = f"tools/{rel}"
         assert any(path == s or path.startswith(s.rstrip("/") + "/") for s in sources), f"{path} not in dist.py SOURCES"
@@ -483,6 +684,13 @@ def test_lastrun_reads_how_the_last_game_ended() -> None:
     assert lastrun.verdict("spec.py ... args.cc.split()\n", "0.1.5", sigs) == "known 29"
     assert lastrun.verdict("[host] FATAL: SIGSEGV at host 0x1\n", "0.1.11", sigs) == "crash"
     assert lastrun.verdict("[host] frame 300\n", "0.1.11", sigs) == ""   # killed or power off: nothing to say
+    # a hang the player closed the window on is a crash; one that ended ("slow, not hung") before the close is clean
+    hang = "vk: the GPU has not finished submission 7 in 5.0 s and the driver reports no device loss\n"
+    slow = "vk: the GPU finished submission 7 after 6.2 s: it was slow, not hung\n"
+    closed = "[host] gfx: window closed; exiting\n"
+    assert lastrun.verdict(hang + closed, "0.1.11", sigs) == "crash"
+    assert lastrun.verdict(hang + slow + closed, "0.1.11", sigs) == "clean"
+    assert lastrun.verdict(slow + hang + closed, "0.1.11", sigs) == "crash"
     assert (ROOT / "tools/github/signatures.toml").is_file()
 
 
@@ -593,3 +801,55 @@ def test_space_checked_before_copying(tmp_path: Path, monkeypatch: pytest.Monkey
     with pytest.raises(gamecopy.Failed) as e:
         gamecopy.check_space(tmp_path / "game", 5 * gamecopy.GIB)
     assert e.value.code == "space" and e.value.detail.startswith("5.0 GB, 2.0 GB free in ")
+
+
+def test_keys_ignore_files_the_package_does_not_ship(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # a package unzipped by hand over an older one keeps the files it moved (0.1.13's sm86/translate/flow.py): only
+    # the listed ones count, so the update does not redo the shaders
+    import shaderstep  # noqa: PLC0415
+
+    (tmp_path / "a.py").write_text("new")
+    (tmp_path / "stale.py").write_text("old")
+    monkeypatch.setattr(shaderstep, "ROOT", tmp_path)
+    monkeypatch.setattr(shaderstep, "SHIPPED", tmp_path / "FILES")
+    files = [tmp_path / "a.py", tmp_path / "stale.py"]
+    assert shaderstep.shipped(files) == files  # a checkout: no list
+    (tmp_path / "FILES").write_text("a.py\n")
+    assert shaderstep.shipped(files) == [tmp_path / "a.py"]
+
+
+def test_shipped_follows_the_appimage_setup_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # #632: the AppImage's setup/ is a symlink into its mount and ROOT is resolved; a file named through the symlink
+    # (prepare.py run as <game>/setup/src/tools/prepare/prepare.py) stopped the setup at check with a ValueError
+    import shaderstep  # noqa: PLC0415
+
+    mount = tmp_path / "mount/setup/src"
+    mount.mkdir(parents=True)
+    (mount / "a.py").write_text("x")
+    (mount / "FILES").write_text("a.py\n")
+    (tmp_path / "game").mkdir()
+    (tmp_path / "game/setup").symlink_to(tmp_path / "mount/setup")
+    monkeypatch.setattr(shaderstep, "ROOT", mount.resolve())
+    monkeypatch.setattr(shaderstep, "SHIPPED", mount / "FILES")
+    via_link = tmp_path / "game/setup/src/a.py"
+    assert shaderstep.shipped([via_link]) == [via_link]
+
+
+@pytest.mark.parametrize("version,index,runs", [(3, True, []), (2, True, ["pipeline_pairs.py"]),
+                                                (2, False, ["extract.py", "pipeline_pairs.py"])])  # fmt: skip
+def test_ensure_pairs(tmp_path: Path, monkeypatch, version: int, index: bool, runs: list[str]) -> None:
+    """The warm step's pipeline-pairs.bin: one of the package's format kept; another version's written again (an
+    update whose shaders key did not change kept a v2 file the v3 runtime rejected), with extract.py first when
+    setup-work/shaders is gone."""
+    import shaderstep
+
+    dest, work = tmp_path / "game", tmp_path / "work"
+    (work / "shaders").mkdir(parents=True)
+    dest.mkdir()
+    if index:
+        (work / "shaders/index.csv").write_text("sha1,stage\n")
+    (dest / "pipeline-pairs.bin").write_bytes(shaderstep.pipeline_pairs.MAGIC + version.to_bytes(4, "little") + bytes(4))
+    calls: list[str] = []
+    monkeypatch.setattr(shaderstep, "run", lambda cmd, **_: calls.append(Path(cmd[1]).name))
+    shaderstep.ensure_pairs(tmp_path / "exefs", tmp_path / "romfs", work, dest)
+    assert shaderstep.PAIRS_VERSION == 3 and calls == runs

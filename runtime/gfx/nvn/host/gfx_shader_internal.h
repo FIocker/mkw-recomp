@@ -49,4 +49,10 @@ void gfx_shader_reflect(GfxShader *s);
 GfxShader *gfx_shader_find(const uint8_t key[32]);
 GfxShader *gfx_shader_insert(GfxShader *s);
 void gfx_shader_key_hex(const uint8_t key[32], char out[65]);
+
+// spirv/shaders.pack (gfx_shader_pack.c): opened once with the prepared folder; a program's file of kind 0 .spv,
+// 1 .res.json, 2 .cs.spv. read returns 0 when the loose file is to be read instead.
+void gfx_shader_pack_open(const char *dir);
+int gfx_shader_pack_read(const uint8_t key[32], int kind, uint8_t **out, uint64_t *size);
+size_t gfx_shader_pack_keys(uint8_t (**keys)[32]);   // a malloc'd copy of the pack's keys; 0 (and NULL) without one
 #endif

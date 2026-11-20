@@ -9,6 +9,7 @@ the texts the host shows.
 | `gfx_present.c`, `gfx_wsys.h`, `gfx_window_sdl.c` | Swapchain, present and vsync; SDL3 window |
 | `gfx_hdr.c` | HDR output (`MKW_HDR` auto/off): what nn::vi tells the game about the display's HDR (`MKW_HDR_FAKE`), the HDR10 swapchain format and metadata, and 10-bit PQ pixels to sRGB bytes for shots, captures and thumbnails |
 | `gfx_shader.c` | Loads MKW's prepared SPIR-V (`prepared_get`, key `nvn2_program_key`) into the memory cache; loads the pipeline prewarm shaders in parallel (`gfx_shader_prewarm`); frees the SPIR-V only the prewarm read (`gfx_shader_spirv_release`) and reads it again from its file if a draw asks |
+| `gfx_shader_pack.c` | `spirv/shaders.pack` (`tools/shaders/pack.py`): a program's `.spv`, `.res.json` or `.cs.spv` read from the one file, while its folder was not written after it; `gfx_shader.c` reads the loose file otherwise |
 | `gfx_shader_int.c` | A prepared shader's variants with integer inputs, integer outputs or integer images; failed integer-image conversions name the program and reason and save their input with `MKW_SPIRV_INT_DUMP` |
 | `gfx_shader_internal.h` | The `GfxShader` struct and the memory cache, shared by `gfx_shader.c`, `gfx_shader_int.c` and `gfx_shader_refl.c` |
 | `gfx_shader_refl.c` | Reflection of a prepared shader: its `.res.json` into resource arrays, specialization words and flags, and its SPIR-V's interface Locations and workgroup size |
