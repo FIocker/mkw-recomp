@@ -432,8 +432,15 @@ static void ngx_init(void) {
 
 #define CAM_BYTES 0x980u   // the scene camera block's size (vertex c4)
 #define CAM_ROWS 32
+// The SMAA passes (1.0.0), by the first 8 bytes of their program key (spirv/<key>.spv): the key comes from the game's
+// program, so it holds whatever the translator makes of it. Their SPIR-V's FNV-1a (the translator of main bd367ee;
+// the edge pass was a1becfadc5da81ad before it) changed with translate.py's glslc -O0 (b5244df): the blend became
+// 87ba66678d075862 and the upscaler never ran on a set-up made with it, so the SPIR-V is only a fallback.
+#define KEY_SMAA_BLEND 0x41cee8c6ac1280dfull
+#define KEY_SMAA_EDGE 0x6f97a82553fc9820ull
+#define KEY_SMAA_WEIGHT 0x8dc1048ac84eb282ull
 #define SHADER_SMAA_BLEND 0x138f5b8eb8a6b9e0ull
-#define SHADER_SMAA_EDGE 0x9e672c00f0cd8eb1ull   // 1.0.0, the translator of main bd367ee (was a1becfadc5da81ad; only traced)
+#define SHADER_SMAA_EDGE 0x9e672c00f0cd8eb1ull
 #define SHADER_SMAA_WEIGHT 0x68b69c76ad2d7905ull
 
 typedef struct {
@@ -484,12 +491,33 @@ static struct {
     uint64_t log_frame;
 } T = {.jsign = {1, 1}, .cfg_seen = ~0u, .reset = 1};
 
-// The game's programs are known by the FNV-1a of their SPIR-V (the SHADER_* constants), of the generic shader for a
-// variant. Asked on every draw: gfx_shader_spirv_fnv keeps it on the shader.
+// The FNV-1a of a program's SPIR-V, of the generic shader for a variant (traces; the SHADER_* fallback). Asked on
+// every draw: gfx_shader_spirv_fnv keeps it on the shader.
 static uint64_t spv_hash(const GfxShader *s) {
     if (!s) return 0;
     const GfxShader *g = gfx_shader_variant_of(s);
     return gfx_shader_spirv_fnv(g ? g : s);
+}
+
+// The first 8 bytes of a program's key, of the generic shader for a variant (variants have keys of their own): the
+// KEY_* constants.
+static uint64_t prog_key(const GfxShader *s) {
+    if (!s) return 0;
+    const GfxShader *g = gfx_shader_variant_of(s);
+    const uint8_t *k = gfx_shader_key(g ? g : s);
+    uint64_t v = 0;
+    for (int i = 0; k && i < 8; i++) v = v << 8 | k[i];
+    return v;
+}
+
+// 0 not an SMAA pass, else 1 the edges, 2 the weights, 3 the blend
+static int smaa_pass(const GfxShader *fs) {
+    uint64_t k = prog_key(fs);
+    if (k == KEY_SMAA_BLEND) return 3;
+    if (k == KEY_SMAA_WEIGHT) return 2;
+    if (k == KEY_SMAA_EDGE) return 1;
+    uint64_t h = spv_hash(fs);
+    return h == SHADER_SMAA_BLEND ? 3 : h == SHADER_SMAA_WEIGHT ? 2 : h == SHADER_SMAA_EDGE ? 1 : 0;
 }
 
 static void read_cfg(void) {
@@ -620,9 +648,9 @@ int vk_tmp_draw(VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     // the SMAA blend is followed also with the upscaler off: the game's own upscale after it draws black in this port
     // (vanilla runs with 3D lines below the screen's, 15/11/2026), and vk_tmp_dispatch then scales it itself
     if (!fs || T.done || (T.engine == VK_TMP_OFF && romfs_resolution_scene_permille() >= 1000)) return 1;
-    uint64_t h = spv_hash(fs);
-    if (h == SHADER_SMAA_BLEND || h == SHADER_SMAA_EDGE || h == SHADER_SMAA_WEIGHT) trace_hash("fs-smaa", h, ex);
-    if (h != SHADER_SMAA_BLEND) return 1;
+    int smaa = smaa_pass(fs);
+    if (smaa) trace_hash("fs-smaa", prog_key(fs), ex);
+    if (smaa != 3) return 1;
     // The SMAA blend: its tex slot 0 is the tonemapped scene. With the screen at the scene's size (native) it writes
     // the screen target, and the upscaler takes its place; else the upscale dispatch comes after it.
     Img pre;
