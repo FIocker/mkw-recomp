@@ -494,7 +494,11 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
         d.flags = hdr ? FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE : 0;
         if (display_mv) d.flags |= FFX_FRAMEGENERATION_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS;
         d.displaySize = {bb->w, bb->h};
-        d.maxRenderSize = {bb->w, bb->h};
+        // the depth and motion vectors can be larger than the picture shown: DLSS native renders the game's 1440 lines
+        // also for a 1080-line screen. A context made for the picture's size alone was made again every frame
+        // (in->w > FG.rw), 470 times in a 20 s race at 0.50x game speed (inst-39-own, 20/11/2026).
+        uint32_t rw = in->w > bb->w ? in->w : bb->w, rh = in->h > bb->h ? in->h : bb->h;
+        d.maxRenderSize = {rw, rh};
         d.backBufferFormat = surface(bb->fmt);
         ffxCreateBackendVKDesc be = {};
         ffxCreateBackendVKDesc_DEPRECATED old = {};
@@ -524,9 +528,10 @@ extern "C" int vk_tmp_ffx_fg(VkCommandBuffer cb, const VkTmpFgInputs *in, const 
                    bb->w, bb->h, r);
             return 0;
         }
-        FG.w = bb->w, FG.h = bb->h, FG.rw = bb->w, FG.rh = bb->h, FG.fmt = bb->fmt, FG.id = 0;
+        FG.w = bb->w, FG.h = bb->h, FG.rw = rw, FG.rh = rh, FG.fmt = bb->fmt, FG.id = 0;
         FG.api = api;
-        rt_log("ffx[fg]: FSR 3.1 frame generation context %ux%u via %s", bb->w, bb->h, api->path);
+        rt_log("ffx[fg]: FSR 3.1 frame generation context %ux%u (render up to %ux%u) via %s", bb->w, bb->h, rw, rh,
+               api->path);
         if (api->query) {
             ffxQueryGetProviderVersion version = {};
             version.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
