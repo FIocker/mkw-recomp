@@ -13,15 +13,18 @@
 #include "ui/menu/option_rows.h"
 #include "ui/glyphs/glyphs.h"
 #include "ui/menu/settings_tabs.h"
+#include "plugin/plugin.h"
 
 extern "C" {
 #include "cfg.h"
 #include "fs.h"
+#include "gfx.h"
 #include "input.h"
 #include "input_map.h"
 #include "platform/platform.h"
 #include "sysinfo.h"
 #include "ui/menu/menu.h"
+#include "sdk/ov/ov_lanif.h"
 #include "ui_text.h"
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 }
@@ -160,6 +163,8 @@ static const char *present_note(void) {
 }
 
 // ---- the tabs
+static void hdr_rows(void);   // after the HDR row, below
+
 // The window and the picture's shape on it.
 static void tab_screen(float scale) {
     opt_begin("##screen", scale);
@@ -186,7 +191,43 @@ static void tab_screen(float scale) {
         const char *names[2] = {menu_text(UI_MENU_FPS_AUTO), menu_text(UI_MENU_PERF_OFF)};
         opt_choice_list("MKW_HDR", UI_MENU_HDR, vals, names, 2, UI_MENU_HDR_DESC);
     }
+    hdr_rows();
     opt_end();
+}
+
+// The HDR rows after HDR: the tone mapper (gfx_shader.c; its programs come from tools/shaders/renodx.py, so without
+// them the row is greyed out) and the peak and paper white the game is told (gfx_hdr.c), all only while HDR is on, and
+// the two values only with PsychoV35 (with the game's curve the console's system values hold).
+static void hdr_rows(void) {
+    uint16_t peak, white;
+    const bool on = gfx_hdr_output(&peak, &white) != 0;
+    {
+        static const char *const vals[] = {"vanilla", "psychov"};
+        const char *names[2] = {menu_text(UI_MENU_HDR_TONEMAP_VANILLA), menu_text(UI_MENU_HDR_TONEMAP_PSYCHOV)};
+        static int have = -1;
+        if (have < 0) {
+            char p[1200];
+            const char *sp = cfg_get("MKW_SPIRV");
+            if (sp && *sp) snprintf(p, sizeof p, "%s-renodx", sp);   // gfx_shader.c tonemap_dir
+            else snprintf(p, sizeof p, "%s/spirv-renodx", cfg_game_dir());
+            have = plat_dir_exists(p);
+        }
+        if (!have) opt_disable_next(UI_MENU_HDR_TONEMAP_MISSING);
+        else if (!on) opt_disable_next(UI_MENU_HDR_DESC);
+        opt_choice_list("MKW_HDR_TONEMAP", UI_MENU_HDR_TONEMAP, vals, names, 2, UI_MENU_HDR_TONEMAP_DESC);
+    }
+    // 1 nit a step (ten held); automatic below the lowest, right from it starts at the system's value
+    char fmt[32];
+    snprintf(fmt, sizeof fmt, menu_text(UI_MENU_HDR_NITS), "%d");
+    unsigned sp = 1000, sw = 203;
+    sscanf(cfg_value("MKW_HDR_SYSTEM"), "%u/%u", &sp, &sw);
+    const bool psychov = !strcmp(cfg_value("MKW_HDR_TONEMAP"), "psychov");
+    if (!on) opt_disable_next(UI_MENU_HDR_DESC);
+    else if (!psychov) opt_disable_next(UI_MENU_HDR_NEEDS_PSYCHOV);
+    opt_slider_auto("MKW_HDR_PEAK", UI_MENU_HDR_PEAK, 100, 10000, UI_MENU_HDR_PEAK_DESC, fmt, menu_text(UI_MENU_FPS_AUTO), (int)sp);
+    if (!on) opt_disable_next(UI_MENU_HDR_DESC);
+    else if (!psychov) opt_disable_next(UI_MENU_HDR_NEEDS_PSYCHOV);
+    opt_slider_auto("MKW_HDR_WHITE", UI_MENU_HDR_WHITE, 40, 1000, UI_MENU_HDR_WHITE_DESC, fmt, menu_text(UI_MENU_FPS_AUTO), (int)sw);
 }
 
 // The Quality presets: the values each one gives the four rows below it, in the order
@@ -419,9 +460,10 @@ static const char *button_icons_note(void) {
     return note;
 }
 
-// Each player's controller and its battery (input/input_power.c), over the settings (discussion #516).
+// Each player's controller and its battery (input/input_power.c), over the settings (discussion #516). On the start
+// screen the gamepads start on first use and follow hotplug through input_hotplug (the main page keeps its own list).
 static void pad_rows(void) {
-    if (!input_gamepads_running()) return;   // the start screen shows them on its main page (launcher.cpp pad_row)
+    if (!input_gamepads_running()) return;
     opt_group(UI_MENU_PADS);
     int shown = 0;
     for (int p = 0; p < INPUT_MAX_PLAYERS; p++) {
@@ -461,10 +503,29 @@ static void tab_controls(float scale) {
     opt_toggle("MKW_SWITCH2", UI_MENU_SWITCH2, UI_MENU_SWITCH2_DESC);   // input/switch2.c, at the next start
     opt_toggle("MKW_DSU", UI_MENU_DSU, UI_MENU_DSU_DESC);   // input/dsu.c, live
     opt_slider("MKW_STICK_DEADZONE", UI_MENU_STICK_DEADZONE, 0, 40, UI_MENU_STICK_DEADZONE_DESC, 1, "%.0f %%");   // input.c
+    opt_toggle("MKW_KEYBOARD_MOUSE", UI_MENU_KEYBOARD_MOUSE, UI_MENU_KEYBOARD_MOUSE_DESC);   // input.c, live
     opt_slider("MKW_MOUSE_SENS", UI_MENU_MOUSE_SENS, 0, 10, UI_MENU_MOUSE_SENS_DESC, 0.1f, "%.1f");
     binds_rows(scale);
     opt_end();
     binds_after_page();
+}
+
+// The network LAN play uses (MKW_LAN_IP): Automatic, then each address of a local network with its adapter's name, so
+// a player on ZeroTier or N2N picks theirs instead of writing the address in mkw.ini (#707). The list is read again
+// every two seconds (listing the adapters is slow on Windows). A set address that is not in it any more (the VPN is
+// down) stays shown as it is.
+static void row_lan_network(void) {
+    static OvLanIf ifs[16];
+    static int n;
+    static uint64_t read_at;
+    if (!read_at || plat_now_ns() - read_at > 2000000000ull) n = ov_lan_list(ifs, 16), read_at = plat_now_ns();
+    static char labels[16][80];
+    const char *vals[17] = {""}, *names[17] = {menu_text(UI_MENU_AUTO)};
+    for (int i = 0; i < n; i++) {
+        snprintf(labels[i], sizeof labels[i], "%s (%s)", ifs[i].ip, ifs[i].name);
+        vals[i + 1] = ifs[i].ip, names[i + 1] = labels[i];
+    }
+    opt_choice_list("MKW_LAN_IP", UI_MENU_LAN_NET, vals, names, n + 1, UI_MENU_LAN_NET_DESC);
 }
 
 // The languages, LAN play and the update check: the Game and Menu tabs of before, two rows each.
@@ -482,6 +543,7 @@ static void tab_general(float scale) {
     };
     opt_choice("MKW_MENU_LANG", UI_MENU_MENU_LANG, langs, sizeof langs / sizeof *langs, UI_MENU_MENU_LANG_DESC);
     opt_toggle("MKW_LAN", UI_MENU_LAN, UI_MENU_LAN_DESC);   // sdk/ov/ov_socket.c, the lan set of recomp/patches-mkw.txt
+    row_lan_network();   // sdk/ov/ov_lanaddr.c
     opt_toggle("MKW_UPDATE_CHECK", UI_MENU_UPDATE_CHECK, UI_MENU_UPDATE_CHECK_DESC);   // ui/launcher/launcher_update.cpp
     static const UiTextId start[] = {UI_MENU_AUTO, UI_MENU_START_ALWAYS, UI_MENU_START_SKIP};
     opt_choice("MKW_START_SCREEN", UI_MENU_START_SCREEN, start, 3, UI_MENU_START_SCREEN_DESC);   // launcher.cpp console_start
@@ -682,24 +744,46 @@ void settings_opened_menu(void) {
 
 bool settings_modal(void) { return g_modal || binds_modal(); }
 
+// The tabs in their order: the players' (Screen to General), the mods' (MkwPluginApi.settings_tab: ids from TAB_MOD,
+// in the game only), then Advanced and Hacks. Returns how many.
+enum { TAB_MOD = 100 };
+static int tab_order(int *out) {
+    int n = 0;
+    for (int k = TAB_SCREEN; k <= TAB_GENERAL; k++) out[n++] = k;
+    for (int i = 0; i < plugins_tab_count(); i++) out[n++] = TAB_MOD + i;
+    out[n++] = TAB_ADVANCED;
+    out[n++] = TAB_HACKS;
+    return n;
+}
+
 void settings_tabs(float scale, float bottom) {
+    int order[TAB_COUNT + 16], ntabs = tab_order(order);
     int step = settings_modal()                                                                          ? 0
              : ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
              : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1
                                                                                                          : 0;
-    if (step) g_tab_request = (g_tab + step + TAB_COUNT) % TAB_COUNT;
+    if (step) {
+        int at = 0;
+        for (int i = 0; i < ntabs; i++)
+            if (order[i] == g_tab) at = i;
+        g_tab_request = order[(at + step + ntabs) % ntabs];
+    }
     if (g_tab_request >= 0) g_focus_page = g_tab_request;   // the new page's first row takes the cursor
 
     if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
-        for (int k = 0; k < TAB_COUNT; k++) {
+        for (int at = 0; at < ntabs; at++) {
+            int k = order[at];
             char label[128];
-            snprintf(label, sizeof label, "  %s  ###tab%d", menu_text(kTabNames[k]), k);   // the id stays per language
+            snprintf(label, sizeof label, "  %s  ###tab%d", k >= TAB_MOD ? plugins_tab_title(k - TAB_MOD)
+                                                                          : menu_text(kTabNames[k]),
+                     k);   // the id stays per language
             // the testing and shortcut tabs in the dim colour: the ones most players need come first and stand out
-            bool quiet = k >= TAB_ADVANCED && k != g_tab;
+            bool quiet = k >= TAB_ADVANCED && k < TAB_MOD && k != g_tab;
             if (quiet) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
             bool open = ImGui::BeginTabItem(label, nullptr, g_tab_request == k ? ImGuiTabItemFlags_SetSelected : 0);
             if (quiet) ImGui::PopStyleColor();
             if (!open) continue;
+            if (k >= TAB_MOD && g_tab != k) plugins_tab_shown(k - TAB_MOD);   // its page's first frame again
             g_tab = k;
             if (g_focus_page == k) {
                 opt_focus_first();
@@ -718,6 +802,7 @@ void settings_tabs(float scale, float bottom) {
             case TAB_GENERAL: tab_general(scale); break;
             case TAB_ADVANCED: tab_advanced(scale); break;
             case TAB_HACKS: tab_hacks(scale); break;
+            default: plugins_tab_draw(k - TAB_MOD, scale); break;   // a mod's (MkwPage)
             }
             ImGui::EndTabItem();
         }

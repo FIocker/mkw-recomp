@@ -654,6 +654,61 @@ msgstr ""
 "「自動」會在螢幕處於 HDR 模式時（Windows 中為 設定 > 顯示 > 使用 HDR）像主機一樣顯示遊戲自帶的 HDR 畫面，亮度跟隨系統的 HDR "
 "設定。「OFF」則始終顯示標準畫面。立即生效。"
 
+msgctxt "UI_MENU_HDR_TONEMAP"
+msgid "HDR tone mapper"
+msgstr "HDR 色調映射"
+
+msgctxt "UI_MENU_HDR_TONEMAP_DESC"
+msgid ""
+"How the scene's brightness is fitted to the display in HDR. Vanilla is the game's own curve, "
+"which never goes above 1.5 times paper white. PsychoV35 is RenoDX's: the same mid-tones and "
+"colour grade, with highlights that roll off smoothly up to the display's peak. Applies after a "
+"restart, as do peak and paper white changes while it is on."
+msgstr ""
+"HDR 下場景亮度如何適配顯示器。Vanilla 是遊戲內建的曲線，不會超過紙白的 1.5 倍。PsychoV35 來自 "
+"RenoDX：中間調和調色相同，高光則平滑過渡到顯示器的峰值亮度。重新啟動後生效；開啟時，峰值亮度和紙白的變更同樣需要重新啟動。"
+
+msgctxt "UI_MENU_HDR_TONEMAP_VANILLA"
+msgid "Vanilla"
+msgstr "Vanilla"
+
+msgctxt "UI_MENU_HDR_TONEMAP_PSYCHOV"
+msgid "PsychoV35"
+msgstr "PsychoV35"
+
+msgctxt "UI_MENU_HDR_TONEMAP_MISSING"
+msgid "Its programs are made by the setup. Set the game up again (an update does it) to add them."
+msgstr "其程式由安裝步驟產生。請重新設定遊戲（更新時會自動進行）以新增它們。"
+
+msgctxt "UI_MENU_HDR_NEEDS_PSYCHOV"
+msgid "Only with the PsychoV35 tone mapper. Vanilla uses the display's own values, as the console."
+msgstr "僅在使用 PsychoV35 色調映射時有效。Vanilla 與主機一樣使用顯示器本身的數值。"
+
+msgctxt "UI_MENU_HDR_PEAK"
+msgid "HDR peak brightness"
+msgstr "HDR 峰值亮度"
+
+msgctxt "UI_MENU_HDR_PEAK_DESC"
+msgid ""
+"The brightest the game draws. Automatic uses the display's peak as Windows reports it. Applies at "
+"once."
+msgstr "遊戲繪製的最高亮度。自動使用 Windows 回報的顯示器峰值。立即生效。"
+
+msgctxt "UI_MENU_HDR_WHITE"
+msgid "HDR paper white"
+msgstr "HDR 紙白"
+
+msgctxt "UI_MENU_HDR_WHITE_DESC"
+msgid ""
+"How bright white menus and the scene's mid-tones are. Automatic uses Windows' SDR content "
+"brightness, which is often much brighter than a game wants; 203 nits is the HDR reference. Lower "
+"values leave the highlights more room. Applies at once."
+msgstr "選單白色和場景中間調的亮度。自動使用 Windows 的 SDR 內容亮度，通常比遊戲所需亮得多；HDR 參考值為 203 尼特。數值越低，高光空間越大。立即生效。"
+
+msgctxt "UI_MENU_HDR_NITS"
+msgid "%s nits"
+msgstr "%s 尼特"
+
 msgctxt "UI_MENU_SHARPNESS"
 msgid "FSR sharpness"
 msgstr "FSR 銳利度"
@@ -740,6 +795,16 @@ msgid ""
 "ports 49152 and 35000). It only reaches local network addresses, never the internet. Applies at "
 "the next start."
 msgstr "標題選單的本地無線遊戲變為區域網路遊戲，可與同一區域網路中的其他電腦比賽（UDP 連接埠 49152 和 35000）。只連線區域網路位址，絕不連線網際網路。下次啟動時生效。"
+
+msgctxt "UI_MENU_LAN_NET"
+msgid "LAN network"
+msgstr "區域網路"
+
+msgctxt "UI_MENU_LAN_NET_DESC"
+msgid ""
+"The network LAN play uses, for ZeroTier, N2N, Tailscale or a VPN: pick the one the other players "
+"are on. Automatic picks the best network by itself. Applies at the next start."
+msgstr "區域網路遊戲使用的網路。使用 ZeroTier、N2N、Tailscale 或 VPN 時，請選擇其他玩家所在的網路。自動會選擇最合適的。下次啟動時生效。"
 
 msgctxt "UI_MENU_VOLUME"
 msgid "Volume"
@@ -836,6 +901,16 @@ msgstr "Xbox（A 在下）"
 msgctxt "UI_MENU_PAD_LAYOUT_IN_USE"
 msgid "in use: %s"
 msgstr "正在使用：%s"
+
+msgctxt "UI_MENU_KEYBOARD_MOUSE"
+msgid "Keyboard and mouse"
+msgstr "鍵盤和滑鼠"
+
+msgctxt "UI_MENU_KEYBOARD_MOUSE_DESC"
+msgid ""
+"Off: the game ignores the keyboard and the mouse (controllers only) and the mouse cursor stays "
+"free. Esc still opens this menu."
+msgstr "關閉：遊戲忽略鍵盤和滑鼠（僅手把），滑鼠游標保持自由。按 Esc 仍可開啟此選單。"
 
 msgctxt "UI_MENU_MOUSE_SENS"
 msgid "Mouse camera sensitivity"
@@ -2397,6 +2472,16 @@ msgid ""
 "Native plugin: runs its own program on your computer alongside the game. Enable it only if you "
 "trust where it comes from"
 msgstr "原生外掛：會在你的電腦上與遊戲一同執行它自己的程式。僅在信任其來源時啟用"
+
+#. A mod's button beside Delete: opens the options page its plugin draws (runtime/ui/launcher/mod_page.cpp).
+msgctxt "UI_MOD_OPTIONS"
+msgid "Options"
+msgstr "選項"
+
+#. The options page of a mod whose plugin has none for this system.
+msgctxt "UI_MOD_NO_OPTIONS"
+msgid "This mod has no options"
+msgstr "此模組沒有選項"
 
 msgctxt "UI_MOD_CODE_REBUILD"
 msgid "code: turning it on or off builds the game code again before you play (a few minutes)"
